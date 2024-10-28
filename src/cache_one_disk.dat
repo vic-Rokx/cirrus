@@ -1,0 +1,7 @@
+key:name;
+value:string:Vic;
+key:list;
+value:array:4:string:Elem1:int:324:string:Elem3:string:Elem4;
+key:age;
+value:int:22;
+;
