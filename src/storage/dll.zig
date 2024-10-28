@@ -101,14 +101,14 @@ pub const DLinkedList = struct {
     }
 };
 
-// test "Create linkedList" {
-//     var ll = DLinkedList.init(std.heap.page_allocator);
-//     try ll.addFront("Node Two");
-//     try ll.addFront("Node One");
-//     try ll.addBack("Node Five");
-//
-//     _ = ll.next();
-//     _ = ll.next();
-//     const curr_node = ll.next();
-//     std.debug.print("\n This is the current node{s}\n", .{curr_node.?.value});
-// }
+test "Create linkedList" {
+    var ll = DLinkedList.init(std.heap.page_allocator);
+    try ll.addFront("Node Two");
+    try ll.addFront("Node One");
+    try ll.addBack("Node Five");
+
+    _ = ll.next();
+    _ = ll.next();
+    const curr_node = ll.next();
+    std.debug.print("\n This is the current node{s}\n", .{curr_node.?.value});
+}

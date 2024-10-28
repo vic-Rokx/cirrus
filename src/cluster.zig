@@ -15,6 +15,9 @@ const connections = @import("cache_runtime/connections.zig");
 const worker = connections.worker;
 const parseCommand = connections.parseCommand;
 const snapCaches = @import("snapshot.zig").snapCaches;
+const loadCacheFromDisk = @import("snapshot.zig").loadCacheFromDisk;
+const SnapShotError = @import("snapshot.zig").SnapShotError;
+const SnapShot = @import("snapshot.zig");
 
 const DEFAULT_PORT: usize = 6379;
 
@@ -132,7 +135,7 @@ fn runCache(cache_inst: *Cirrus) !void {
     try cache_inst.*.run();
 }
 
-pub fn populationCacheArray(self: *Self) !void {
+pub fn populateCacheArray(self: *Self) !void {
     helpers.assert_cm(self.cache_count > 0, "Cache count cannot be less than zero.");
     self.caches = self.arena.*.alloc(*Cache, self.cache_count) catch {
         std.debug.print("\nFailed to alloc memory for caches", .{});
@@ -140,6 +143,26 @@ pub fn populationCacheArray(self: *Self) !void {
     };
     for (self.caches_inst.?, 0..) |cache_inst, i| {
         self.caches.?[i] = &cache_inst.cache;
+    }
+}
+
+fn populateCacheData(self: *Self, snapshot: *SnapShot) !void {
+    for (self.caches.?, 0..) |cache, i| {
+        var buf_size: [256]u8 = undefined;
+        const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_cache_{}.dat", .{i});
+        snapshot.loadCacheFromDisk(cacheName, cache) catch |err| {
+            switch (err) {
+                SnapShotError.FailedToLoadFile => {
+                    helpers.error_print_str("\nFile does not exist");
+                    continue;
+                },
+                SnapShotError.FailedToReadFile => {
+                    helpers.error_print_str("\nCurrupted data");
+                },
+                else => {},
+            }
+        };
+        cache.*.key_change_count = 0;
     }
 }
 
@@ -167,8 +190,11 @@ pub fn run(self: *Self) !void {
     // ;
     // print("\n{s}{s}\n", .{ ascii_art, reset });
 
+    var snapshot: SnapShot = undefined;
+    snapshot.init(self.arena);
     try self.createCluster();
-    try self.populationCacheArray();
+    try self.populateCacheArray();
+    try self.populateCacheData(&snapshot);
 
     var threads: []*std.Thread = undefined;
     helpers.assert_cm(self.caches_inst != null, "Cache Instances are not initilized,\nPlease run createCluster...");
@@ -181,8 +207,8 @@ pub fn run(self: *Self) !void {
         var thread = try std.Thread.spawn(.{}, runCache, .{cache});
         threads[i] = &thread;
     }
-
-    _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
+    // Initialize SnapShot
+    // _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
 
     var poll_args = std.ArrayList(posix.pollfd).init(self.arena.*);
     defer poll_args.deinit();

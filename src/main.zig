@@ -19,9 +19,11 @@ fn createNimbusCache(port: u16) !void {
 }
 
 fn createCluster() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer if (gpa.deinit() != .ok) @panic("Memmory leak...");
-    var allocator = gpa.allocator();
+    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    // defer if (gpa.deinit() != .ok) @panic("Memmory leak...");
+    var allocator = arena.allocator();
 
     const cache_configs = [_]Cluster.CacheConfig{
         Cluster.CacheConfig{

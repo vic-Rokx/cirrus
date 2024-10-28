@@ -2,6 +2,29 @@ const std = @import("std");
 const Entry = @import("cache.zig").Entry;
 const Cache = @import("cache.zig");
 const Types = @import("types.zig");
+const DLL = @import("storage/dll.zig").DLinkedList;
+
+pub const SnapShotError = error{
+    FailedToLoadFile,
+    FailedToReadFile,
+    FailedToSnapCache,
+    FailedToWriteToDisk,
+};
+
+const Self = @This();
+arena: *std.mem.Allocator,
+
+pub fn init(snapshot: *Self, gpa: *std.mem.Allocator) void {
+    snapshot.* = .{
+        .arena = gpa,
+    };
+}
+
+fn diskWriter(writer: *std.fs.File.Writer, slice: []const u8) SnapShotError!void {
+    _ = writer.*.write(slice) catch {
+        return SnapShotError.FailedToWriteToDisk;
+    };
+}
 
 fn saveToFile(filename: []const u8, cache: *Cache) !void {
     const map = cache.*.map;
@@ -11,54 +34,65 @@ fn saveToFile(filename: []const u8, cache: *Cache) !void {
     var writer = file.writer();
     var hash_map_itr = map.iterator();
     while (hash_map_itr.next()) |entry| {
-        _ = try writer.write("key:");
-        _ = try writer.write(entry.key_ptr.*);
-        _ = try writer.write(";\n");
-        _ = try writer.write("value:");
+        try diskWriter(&writer, "key:");
+        try diskWriter(&writer, entry.key_ptr.*);
+        try diskWriter(&writer, ";\n");
+        try diskWriter(&writer, "value:");
         const type_resp = entry.value_ptr.value;
         switch (type_resp) {
-            .dll => {},
+            .dll => |v| {
+                var node = v.*.head;
+                try diskWriter(&writer, "dll:");
+                for (0..v.size) |i| {
+                    if (node != null) {
+                        try diskWriter(&writer, node.?.*.value);
+                        node = node.?.*.next;
+                        if (i == v.size - 1) continue;
+                        try diskWriter(&writer, ":");
+                    }
+                }
+            },
             .array => |v| {
-                _ = try writer.write("array:");
+                try diskWriter(&writer, "array:");
                 var buf_size: [256]u8 = undefined;
                 const array_size_str = try std.fmt.bufPrint(&buf_size, "{}", .{v.values.len});
-                _ = try writer.write(array_size_str);
-                _ = try writer.write(":");
+                try diskWriter(&writer, array_size_str);
+                try diskWriter(&writer, ":");
                 for (v.values, 0..) |resp, i| {
                     switch (resp) {
                         .dll => {},
                         .array => {},
                         .int => |iv| {
-                            _ = try writer.write("int:");
+                            try diskWriter(&writer, "int:");
                             var buf: [256]u8 = undefined;
                             const str = try std.fmt.bufPrint(&buf, "{}", .{iv});
-                            _ = try writer.write(str);
+                            try diskWriter(&writer, str);
                             // try writer.writeInt(i32, iv, std.builtin.Endian.little);
                         },
                         .string => |iv| {
-                            _ = try writer.write("string:");
-                            _ = try writer.write(iv);
+                            try diskWriter(&writer, "string:");
+                            try diskWriter(&writer, iv);
                         },
                     }
                     if (i == v.values.len - 1) continue;
-                    _ = try writer.write(":");
+                    try diskWriter(&writer, ":");
                 }
             },
             .int => |v| {
-                _ = try writer.write("int:");
+                try diskWriter(&writer, "int:");
                 var buf: [256]u8 = undefined;
                 const str = try std.fmt.bufPrint(&buf, "{}", .{v});
-                _ = try writer.write(str);
+                try diskWriter(&writer, str);
                 // try writer.writeInt(u32, 22, std.builtin.Endian.little);
             },
             .string => |v| {
-                _ = try writer.write("string:");
-                _ = try writer.write(v);
+                try diskWriter(&writer, "string:");
+                try diskWriter(&writer, v);
             },
         }
-        _ = try writer.write(";\n");
+        try diskWriter(&writer, ";\n");
     }
-    _ = try writer.write(";\n");
+    try diskWriter(&writer, ";\n");
 }
 
 fn parseKey(key_line: []const u8) []const u8 {
@@ -74,9 +108,10 @@ const TypeEntry = enum {
     int,
     array,
     string,
+    dll,
 };
 
-fn parseValue(value_line: []const u8) !Types.RESP {
+fn parseValue(self: *Self, value_line: []const u8) !Types.RESP {
     var entry: Types.RESP = undefined;
     var value_line_itr = std.mem.splitScalar(u8, value_line, ':');
     _ = value_line_itr.next();
@@ -92,8 +127,8 @@ fn parseValue(value_line: []const u8) !Types.RESP {
             const len: usize = @intCast(try std.fmt.parseInt(i32, value_line_itr.next().?, 10));
             const resp_array = Types.RESP{
                 .array = .{
-                    .allocator = std.heap.c_allocator,
-                    .values = try std.heap.c_allocator.alloc(Types.RESP, len),
+                    .arena = self.arena,
+                    .values = try self.arena.*.alloc(Types.RESP, len),
                 },
             };
             var idx: u16 = 0;
@@ -118,6 +153,7 @@ fn parseValue(value_line: []const u8) !Types.RESP {
                         resp_array.array.values[idx] = Types.RESP{ .string = value_buf };
                     },
                     .array => {},
+                    .dll => {},
                 }
                 idx += 1;
             }
@@ -128,24 +164,39 @@ fn parseValue(value_line: []const u8) !Types.RESP {
             std.debug.print("\nvalue_string:{s}", .{value});
             entry = Types.RESP{ .string = value };
         },
+        .dll => {
+            var dll = DLL.init(self.arena.*);
+            while (value_line_itr.next()) |elem| {
+                std.debug.print("\n{s}", .{elem});
+                try dll.addBack(elem);
+            }
+            entry = Types.RESP{ .dll = &dll };
+        },
     }
     return entry;
 }
 
-fn loadFromFile(filename: []const u8, empty_cache: *Cache) !void {
-    var file = try std.fs.cwd().openFile(filename, .{});
+pub fn loadCacheFromDisk(self: *Self, filename: []const u8, empty_cache: *Cache) !void {
+    var file = std.fs.cwd().openFile(filename, .{}) catch {
+        return SnapShotError.FailedToLoadFile;
+    };
     defer file.close();
 
     var reader = file.reader();
-    const stat = try file.stat();
-    const buffer = try reader.readAllAlloc(std.heap.c_allocator, stat.size);
+    const stat = file.stat() catch {
+        return SnapShotError.FailedToReadFile;
+    };
+    const buffer = try reader.readAllAlloc(self.arena.*, stat.size);
     var tokenizer = std.mem.tokenizeAny(u8, buffer, ";\n");
     var lineIndex: usize = 0;
     while (tokenizer.next()) |line| { // Key _ = parseKey(line);
         const key = parseKey(line);
         const value_line = tokenizer.next().?;
         // Value
-        const value = try parseValue(value_line);
+        const value = self.parseValue(value_line) catch {
+            return SnapShotError.FailedToReadFile;
+        };
+
         try empty_cache.set(key, value);
         lineIndex += 1;
     }
@@ -160,22 +211,26 @@ fn snap(cacheName: []const u8, cache: *Cache) !void {
 }
 
 pub fn snapCaches(caches: *[]*Cache) !void {
-    var sleep: u64 = 60_000_000_000;
+    var sleep: u64 = 1_000_000_000;
     while (true) {
         for (caches.*, 0..) |cache, i| {
             if (cache.key_change_count >= 1000) {
-                sleep = 60_000_000_000;
+                sleep = 1_000_000_000;
                 var buf_size: [256]u8 = undefined;
                 const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_cache_{}.dat", .{i});
                 std.debug.print("\nSnapping the cache: {s}", .{cacheName});
-                try saveToFile(cacheName, cache);
+                saveToFile(cacheName, cache) catch {
+                    return SnapShotError.FailedToSnapCache;
+                };
                 cache.key_change_count = 0;
             } else if (cache.key_change_count >= 1) {
-                sleep = 300_000_000_000;
+                sleep = 1_000_000_000;
                 var buf_size: [256]u8 = undefined;
                 const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_cache_{}.dat", .{i});
                 std.debug.print("\nSnapping the cache: {s}", .{cacheName});
-                try saveToFile(cacheName, cache);
+                saveToFile(cacheName, cache) catch {
+                    return SnapShotError.FailedToSnapCache;
+                };
                 cache.key_change_count = 0;
             }
         }
@@ -184,12 +239,20 @@ pub fn snapCaches(caches: *[]*Cache) !void {
 }
 
 test "write to disk" {
+    var arena = std.heap.c_allocator;
+    var snapshot: Self = undefined;
+    snapshot.init(&arena);
     std.debug.print("\nInitializing cache...\n", .{});
     var cache: Cache = undefined;
-    var arena = std.heap.c_allocator;
     try cache.init(&arena, 0);
 
     std.debug.print("Inserting cache values...\n", .{});
+    var dll = DLL.init(arena);
+    try dll.addFront("Node Two");
+    try dll.addFront("Node One");
+    try dll.addBack("Node Five");
+    const set_dll_value = Types.RESP{ .dll = &dll };
+
     var array = [_]Types.RESP{
         Types.RESP{ .string = "Elem1" },
         Types.RESP{ .int = 324 },
@@ -198,13 +261,15 @@ test "write to disk" {
     };
     const set_array_value = Types.RESP{ .array = .{
         .values = &array,
-        .allocator = std.heap.c_allocator,
+        .arena = &arena,
     } };
+
     const set_string_value = Types.RESP{ .string = "Vic" };
     const set_int_value = Types.RESP{ .int = 22 };
     try cache.set("name", set_string_value);
     try cache.set("list", set_array_value);
     try cache.set("age", set_int_value);
+    try cache.set("dll", set_dll_value);
     std.debug.print("\n---SAVING CACHE TO DISK---\n", .{});
     try saveToFile("cache_one_disk.dat", &cache);
     std.debug.print("\nDeinitializing cache...\n", .{});
@@ -215,17 +280,19 @@ test "write to disk" {
     std.debug.print("\nInitializing empty_cache...\n", .{});
 
     std.debug.print("LOADING CACHE FROM DISK...\n", .{});
-    _ = try loadFromFile("cache_one_disk.dat", &empty_cache);
+    _ = try snapshot.loadCacheFromDisk("cache_one_disk.dat", &empty_cache);
     std.debug.print("\n\n---LOADED CACHE FROM DISK---\n", .{});
     std.debug.print("\n---READY TO USE---\n", .{});
 
     const get_string_value = empty_cache.get("name").?.value;
     const get_array_value = empty_cache.get("list").?.value;
     const get_int_value = empty_cache.get("age").?.value;
+    // const get_dll_value = empty_cache.get("dll").?.value;
 
     try std.testing.expectEqualDeep(set_array_value, get_array_value);
     try std.testing.expectEqualDeep(get_string_value, set_string_value);
     try std.testing.expectEqualDeep(get_int_value, set_int_value);
+    // try std.testing.expectEqualDeep(get_dll_value, set_dll_value);
 
     std.debug.print("\n", .{});
 }

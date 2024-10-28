@@ -95,6 +95,8 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                 return;
             };
             conn.buffer = "+OK";
+            // arena.free(v.key);
+            // arena.free(v.value.string);
         },
         .get => |v| {
             const entry = cache.*.get(v.key);
@@ -104,6 +106,7 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                     "${}\r\n{s}\r\n",
                     .{ entry.?.value.string.len, entry.?.value.string },
                 );
+                // arena.free(v.key);
                 conn.buffer = response;
             } else {
                 conn.buffer = "-ERROR";
@@ -128,6 +131,8 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                     .{dll.size},
                 );
             }
+            // arena.free(v.dll_name);
+            // arena.free(v.dll_new_value);
             conn.buffer = response;
         },
         .lpushmany => |v| {
@@ -153,6 +158,8 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                     .{dll.size},
                 );
             }
+            // arena.free(v.dll_name);
+            // arena.free(v.dll_values);
             conn.buffer = response;
         },
         .lrange => |v| {
