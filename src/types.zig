@@ -1,10 +1,9 @@
 const std = @import("std");
-const DLinkedList = @import("dll.zig").DLinkedList;
+const DLinkedList = @import("storage/dll.zig").DLinkedList;
 
 pub const RESP = union(enum) {
     const Self = @This();
-    // arrayv2: std.ArrayList(RESP),
-    array: struct { values: []RESP, allocator: std.mem.Allocator },
+    array: struct { values: []RESP, arena: *std.mem.Allocator },
     string: []const u8,
     int: i32,
     dll: *DLinkedList,
@@ -33,7 +32,7 @@ pub const RESP = union(enum) {
                     if (v.values.len > 3) {
                         const len = v.values.len;
                         const adj_len = v.values.len - 2;
-                        const arr_str = try self.array.allocator.alloc([]const u8, adj_len);
+                        const arr_str = try self.array.arena.*.alloc([]const u8, adj_len);
 
                         for (2..len) |i| {
                             arr_str[i - 2] = v.values[i].string;

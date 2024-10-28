@@ -1,22 +1,20 @@
 const std = @import("std");
-const Nimbus = @import("nimbus.zig");
-const utils = @import("utils.zig");
+const Cirrus = @import("cirrus.zig");
+const helpers = @import("utils/helpers.zig");
 const posix = std.posix;
 const Parser = @import("parser.zig");
-const error_fns = @import("error.zig");
+const error_fns = @import("utils/error.zig");
 const assert = error_fns.assert_cm;
 const Command = @import("types.zig").Command;
 const print = std.debug.print;
 const Cache = @import("cache.zig");
 const Entry = Cache.Entry;
-const DLL = @import("dll.zig").DLinkedList;
+const DLL = @import("storage/dll.zig").DLinkedList;
 const Types = @import("types.zig");
-const connections = @import("connections.zig");
+const connections = @import("cache_runtime/connections.zig");
+const worker = connections.worker;
+const parseCommand = connections.parseCommand;
 const snapCaches = @import("snapshot.zig").snapCaches;
-
-const Cache_v = struct {
-    data: u8,
-};
 
 const DEFAULT_PORT: usize = 6379;
 
@@ -33,7 +31,7 @@ pub const State = enum {
 pub const Config = struct {
     port: u16,
     addr: []const u8,
-    allocator: *std.mem.Allocator,
+    arena: *std.mem.Allocator,
     replicas: u16,
 };
 
@@ -55,9 +53,9 @@ cache_count: u16,
 replica_count: u16,
 addresses: []const std.net.Address,
 cache_configs: []const CacheConfig,
-allocator: *std.mem.Allocator,
+arena: *std.mem.Allocator,
 caches: ?[]*Cache,
-caches_inst: ?[]*Nimbus,
+caches_inst: ?[]*Cirrus,
 cluster_host: []const u8,
 cluster_port: u16,
 
@@ -77,7 +75,7 @@ pub const ClusterConfig = struct {
     cache_count: u16,
     replica_count: u16,
     cache_configs: []const CacheConfig,
-    allocator: *std.mem.Allocator,
+    gpa: *std.mem.Allocator,
     cluster_host: []const u8,
     cluster_port: u16,
 };
@@ -88,7 +86,7 @@ pub fn init(target: *Self, config: ClusterConfig) !void {
         .replica_count = config.replica_count,
         .addresses = undefined,
         .cache_configs = config.cache_configs,
-        .allocator = config.allocator,
+        .arena = config.gpa,
         .caches = null,
         .caches_inst = null,
         .cluster_port = config.cluster_port,
@@ -101,27 +99,27 @@ pub fn deinit(self: *Self) !void {
     }
     for (self.caches_inst.?) |cache_inst| {
         try cache_inst.deinit();
-        self.allocator.destroy(cache_inst); // Deallocate the cache
+        self.arena.destroy(cache_inst); // Deallocate the cache
     }
 
-    self.allocator.free(self.caches.?); // Deinitialize the ArrayList
-    self.allocator.free(self.caches_inst.?); // Deinitialize the ArrayList
+    self.arena.free(self.caches.?); // Deinitialize the ArrayList
+    self.arena.free(self.caches_inst.?); // Deinitialize the ArrayList
 }
 
 pub fn createCluster(self: *Self) !void {
-    utils.assert_cm(self.cache_count > 0, "Cache count cannot be less than zero.");
-    self.caches_inst = self.allocator.*.alloc(*Nimbus, self.cache_count) catch {
+    helpers.assert_cm(self.cache_count > 0, "Cache count cannot be less than zero.");
+    self.caches_inst = self.arena.*.alloc(*Cirrus, self.cache_count) catch {
         std.debug.print("\nFailed to alloc memory for caches", .{});
         return ClusterError.FailedToAllocMemForCaches;
     };
 
-    var cache_ptr: *Nimbus = undefined;
+    var cache_ptr: *Cirrus = undefined;
     for (self.cache_configs, 0..) |cache_config, i| {
-        cache_ptr = try self.allocator.*.create(Nimbus);
-        const config = Nimbus.Config{
+        cache_ptr = try self.arena.*.create(Cirrus);
+        const config = Cirrus.Config{
             .addr = cache_config.address,
             .port = cache_config.port,
-            .allocator = self.allocator,
+            .arena = self.arena,
             .replicas = self.replica_count,
         };
 
@@ -130,13 +128,13 @@ pub fn createCluster(self: *Self) !void {
     }
 }
 
-fn runCache(cache_inst: *Nimbus) !void {
+fn runCache(cache_inst: *Cirrus) !void {
     try cache_inst.*.run();
 }
 
 pub fn populationCacheArray(self: *Self) !void {
-    utils.assert_cm(self.cache_count > 0, "Cache count cannot be less than zero.");
-    self.caches = self.allocator.*.alloc(*Cache, self.cache_count) catch {
+    helpers.assert_cm(self.cache_count > 0, "Cache count cannot be less than zero.");
+    self.caches = self.arena.*.alloc(*Cache, self.cache_count) catch {
         std.debug.print("\nFailed to alloc memory for caches", .{});
         return ClusterError.FailedToAllocMemForCaches;
     };
@@ -157,7 +155,7 @@ pub fn run(self: *Self) !void {
     try posix.bind(socket_fd, &ip_addr.any, ip_addr.getOsSockLen());
     try posix.listen(socket_fd, 128);
 
-    std.debug.print("Running Nimbus Cluster on {}\n", .{ip_addr});
+    std.debug.print("Running Cirrus Cluster on {}\n", .{ip_addr});
 
     // const reset = "\x1b[0m"; // ANSI escape code to reset color
     // const ascii_art =
@@ -173,9 +171,9 @@ pub fn run(self: *Self) !void {
     try self.populationCacheArray();
 
     var threads: []*std.Thread = undefined;
-    utils.assert_cm(self.caches_inst != null, "Cache Instances are not initilized,\nPlease run createCluster...");
-    utils.assert_cm(self.caches != null, "Caches are not initilized,\nPlease run createCluster...");
-    threads = self.allocator.*.alloc(*std.Thread, 3) catch {
+    helpers.assert_cm(self.caches_inst != null, "Cache Instances are not initilized,\nPlease run createCluster...");
+    helpers.assert_cm(self.caches != null, "Caches are not initilized,\nPlease run createCluster...");
+    threads = self.arena.*.alloc(*std.Thread, 3) catch {
         std.debug.print("\nFailed to alloc memory for caches", .{});
         return ClusterError.FailedToAllocMemForCaches;
     };
@@ -186,9 +184,9 @@ pub fn run(self: *Self) !void {
 
     _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
 
-    var poll_args = std.ArrayList(posix.pollfd).init(std.heap.page_allocator);
+    var poll_args = std.ArrayList(posix.pollfd).init(self.arena.*);
     defer poll_args.deinit();
-    var fd_conns = std.ArrayList(*Conn).init(std.heap.page_allocator);
+    var fd_conns = std.ArrayList(*Conn).init(self.arena.*);
     defer fd_conns.deinit();
 
     while (true) {
@@ -218,7 +216,6 @@ pub fn run(self: *Self) !void {
             try poll_args.append(pfd);
         }
 
-        // std.time.sleep(1_000_000_000);
         const rv = try posix.poll(poll_args.items, 1000);
 
         if (rv < 0) {
@@ -242,7 +239,7 @@ pub fn run(self: *Self) !void {
                     conn.*.start_time = std.time.nanoTimestamp();
 
                     assert(conn.fd > 0, "No valid connection");
-                    connectionIo(conn, &self.caches.?, self.allocator) catch |err| {
+                    connectionIo(conn, &self.caches.?, self.arena) catch |err| {
                         print("\nState machine event error: {any}", .{err});
                         return error.ReadFailed;
                     };
@@ -255,11 +252,11 @@ pub fn run(self: *Self) !void {
             var conn = fd_conns.items[i].*;
 
             if (conn.state == State.Processing) {
-                try connectionIo(&conn, &self.caches.?, self.allocator);
+                try connectionIo(&conn, &self.caches.?, self.arena);
             }
 
             if (conn.state == State.RESP) {
-                try connectionIo(&conn, &self.caches.?, self.allocator);
+                try connectionIo(&conn, &self.caches.?, self.arena);
             }
 
             if (conn.state == State.End) {
@@ -287,159 +284,58 @@ fn hashKey(key: []const u8) u32 {
     return h;
 }
 
-fn worker(conn: *Conn, caches: *const []*Cache, allocator: *std.mem.Allocator) !void {
-    print("\nClient sent: \n{s}", .{conn.rbuf[0..conn.rbuf_size]});
-    // var current_time = std.time.nanoTimestamp();
-
-    var msg = try Parser.parse(&conn.rbuf, std.heap.page_allocator);
-    const command = try msg.toCommand();
+fn parseCaches(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
+    const command = try parseCommand(conn, arena);
     if (command) |cmd| {
         switch (cmd) {
             .ping => {
-                conn.buffer = "PONG";
+                try worker(cmd, conn, caches.*[0], arena);
             },
             .echo => |v| {
-                const response = try std.fmt.allocPrint(std.heap.c_allocator, "${}\r\n{s}\r\n", .{ v.len, v });
-                conn.buffer = response;
+                const hash = hashKey(v);
+                const idx = hash % caches.len;
+                try worker(cmd, conn, caches.*[idx], arena);
             },
             .set => |v| {
                 const hash = hashKey(v.key);
                 const idx = hash % caches.len;
-                print("\nWent to cache{d}", .{idx});
-                caches.*[idx].*.set(v.key, v.value) catch {
-                    conn.buffer = "-ERROR";
-                    return;
-                };
-                conn.buffer = "+OK";
+                try worker(cmd, conn, caches.*[idx], arena);
             },
             .get => |v| {
                 const hash = hashKey(v.key);
                 const idx = hash % caches.len;
-                print("\nWent to cache{d}", .{idx});
-                const entry = caches.*[idx].get(v.key);
-                if (entry != null) {
-                    const response = try std.fmt.allocPrint(
-                        std.heap.c_allocator,
-                        "${}\r\n{s}\r\n",
-                        .{ entry.?.value.string.len, entry.?.value.string },
-                    );
-                    conn.buffer = response;
-                } else {
-                    conn.buffer = "-ERROR";
-                }
+                try worker(cmd, conn, caches.*[idx], arena);
             },
             .lpush => |v| {
                 const hash = hashKey(v.dll_name);
                 const idx = hash % caches.len;
-                print("\nWent to cache{d}", .{idx});
-                const entry = caches.*[idx].get(v.dll_name);
-                var response: []const u8 = ":1\r\n";
-                if (entry == null) {
-                    const dll = try allocator.create(DLL);
-                    dll.* = DLL.init(std.heap.page_allocator);
-                    try dll.*.addFront(v.dll_new_value);
-                    const dll_resp = Types.RESP{ .dll = dll };
-                    try caches.*[idx].set(v.dll_name, dll_resp);
-                } else if (entry != null) {
-                    const dll = entry.?.value.dll;
-                    try dll.*.addFront(v.dll_new_value);
-
-                    response = try std.fmt.allocPrint(
-                        std.heap.c_allocator,
-                        ":{}\r\n",
-                        .{dll.size},
-                    );
-                }
-                conn.buffer = response;
+                try worker(cmd, conn, caches.*[idx], arena);
             },
             .lpushmany => |v| {
                 const hash = hashKey(v.dll_name);
                 const idx = hash % caches.len;
-                print("\nWent to cache{d}", .{idx});
-                const entry = caches.*[idx].get(v.dll_name);
-                var response: []const u8 = ":1\r\n";
-                if (entry == null) {
-                    const dll = try allocator.create(DLL);
-                    dll.* = DLL.init(std.heap.page_allocator);
-                    for (v.dll_values) |value| {
-                        try dll.*.addBack(value);
-                    }
-                    const dll_resp = Types.RESP{ .dll = dll };
-                    try caches.*[idx].set(v.dll_name, dll_resp);
-                } else if (entry != null) {
-                    const dll = entry.?.value.dll;
-                    for (v.dll_values) |value| {
-                        try dll.*.addBack(value);
-                    }
-
-                    response = try std.fmt.allocPrint(
-                        std.heap.c_allocator,
-                        ":{}\r\n",
-                        .{dll.size},
-                    );
-                }
-                conn.buffer = response;
+                try worker(cmd, conn, caches.*[idx], arena);
             },
             .lrange => |v| {
                 const hash = hashKey(v.dll_name);
                 const idx = hash % caches.len;
-                print("\nWent to cache{d}", .{idx});
-                const entry = caches.*[idx].get(v.dll_name);
-                if (entry != null) {
-                    const dll = entry.?.value.dll;
-                    var size: usize = dll.*.size;
-                    const start: usize = @intCast(v.start_index);
-                    const additional: usize = @intCast(@abs(v.end_range));
-
-                    if (additional > size or start >= size) {
-                        conn.buffer = "-ERROR INDEX RANGE";
-                    } else {
-                        if (v.end_range < -1) {
-                            size -= additional - 1;
-                        }
-
-                        var builder: std.RingBuffer = try std.RingBuffer.init(std.heap.c_allocator, 1024);
-                        const addition: []const u8 = try std.fmt.allocPrint(
-                            std.heap.c_allocator,
-                            "*{}\r\n",
-                            .{size},
-                        );
-                        try builder.writeSlice(addition);
-                        var node = dll.*.head.?;
-                        for (0..size) |i| {
-                            if (i >= start) {
-                                const value: []const u8 = try std.fmt.allocPrint(
-                                    std.heap.c_allocator,
-                                    "${}\r\n{s}\r\n",
-                                    .{ size, node.*.value },
-                                );
-                                try builder.writeSlice(value);
-                            }
-                            if (node.*.next != null) {
-                                node = node.*.next.?;
-                            }
-                        }
-                        const len = builder.len();
-                        conn.buffer = builder.data[0..len];
-                    }
-                } else {
-                    conn.buffer = "-ERROR";
-                }
+                try worker(cmd, conn, caches.*[idx], arena);
             },
         }
     }
+
     conn.state = State.RESP;
     return;
 }
 
-fn connectionIo(conn: *Conn, caches: *const []*Cache, allocator: *std.mem.Allocator) !void {
+fn connectionIo(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
     switch (conn.state) {
         State.REQ => {
             print("\nreq state\n", .{});
             try connections.stateReq(conn);
         },
         State.Processing => {
-            worker(conn, caches, allocator) catch |err| {
+            parseCaches(conn, caches, arena) catch |err| {
                 print("\nWorker event error: {any}", .{err});
                 return error.ReadFailed;
             };

@@ -1,13 +1,13 @@
 const std = @import("std");
-const Nimbus = @import("nimbus.zig");
+const Cirrus = @import("cirrus.zig");
 const Cluster = @import("cluster.zig");
 
 fn createNimbusCache(port: u16) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() != .ok) @panic("Memmory leak...");
     var allocator = gpa.allocator();
-    var nimbus: Nimbus = undefined;
-    const config = Nimbus.Config{
+    var nimbus: Cirrus = undefined;
+    const config = Cirrus.Config{
         .addr = "127.0.0.1",
         .port = port,
         .allocator = &allocator,
@@ -42,14 +42,13 @@ fn createCluster() !void {
         .cache_count = 3,
         .replica_count = 2,
         .cache_configs = &cache_configs,
-        .allocator = &allocator,
+        .gpa = &allocator,
         .cluster_host = "127.0.0.1",
         .cluster_port = 6379,
     };
     var cluster: Cluster = undefined;
     try cluster.init(config_cluster);
     try cluster.run();
-
     try cluster.deinit();
 }
 

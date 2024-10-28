@@ -7,10 +7,10 @@ const testing = std.testing;
 
 input: []const u8,
 position: usize = 0,
-allocator: std.mem.Allocator,
+arena: *std.mem.Allocator,
 
-pub fn parse(buffer: []const u8, allocator: std.mem.Allocator) !RESP {
-    var parser = Self{ .input = buffer, .allocator = allocator };
+pub fn parse(buffer: []const u8, allocator: *std.mem.Allocator) !RESP {
+    var parser = Self{ .input = buffer, .arena = allocator };
     // return try parser.parseReq();
     return (&parser).parseReq();
 }
@@ -79,8 +79,8 @@ fn parseArray(self: *Self) error{ EOF, unexpected, OutOfMemory }!RESP {
     const len = try self.parseLengthAndRemove();
     const arr = RESP{
         .array = .{
-            .allocator = self.allocator,
-            .values = try self.allocator.alloc(RESP, len),
+            .arena = self.arena,
+            .values = try self.arena.*.alloc(RESP, len),
         },
     };
 
@@ -95,7 +95,7 @@ fn parseBulkString(self: *Self) error{ EOF, unexpected, OutOfMemory }!RESP {
     // Here we pop '$' => position + 1 = 1;
     _ = try self.pop();
     const len = try self.parseLengthAndRemove();
-    const s = try self.allocator.alloc(u8, len);
+    const s = try self.arena.*.alloc(u8, len);
     std.mem.copyForwards(u8, s, self.input[self.position..(self.position + len)]);
     self.position += len;
     try self.popTerminator();

@@ -2,6 +2,10 @@ const std = @import("std");
 const crypto = std.crypto;
 const fmt = std.fmt;
 
+pub fn stringPrint(preq: []const u8, value: []const u8) void {
+    std.debug.print("\n{s}: {s}\n", .{ preq, value });
+}
+
 pub fn print_pretty_address(precursor: []const u8, color: []const u8, address: std.net.Address) void {
     const reset = "\x1b[0m"; // ANSI escape code to reset color
     const bold = "\x1b[1m"; // ANSI escape code to reset color
