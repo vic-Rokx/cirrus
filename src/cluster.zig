@@ -47,6 +47,7 @@ pub const Conn = struct {
     wbuf_sent: usize,
     wbuf: [1024]u8,
     buffer: []const u8,
+    builder: ?*std.RingBuffer,
     start_time: i128,
     last_check: i128,
 };
@@ -162,6 +163,7 @@ fn populateCacheData(self: *Self, snapshot: *SnapShot) !void {
                 else => {},
             }
         };
+
         cache.*.key_change_count = 0;
     }
 }
@@ -207,6 +209,7 @@ pub fn run(self: *Self) !void {
         var thread = try std.Thread.spawn(.{}, runCache, .{cache});
         threads[i] = &thread;
     }
+
     // Initialize SnapShot
     // _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
 
@@ -287,6 +290,10 @@ pub fn run(self: *Self) !void {
 
             if (conn.state == State.End) {
                 assert(conn.fd > 0, "Not valid connection fd");
+                // If you call conn.builder.?.len(), in a print; it frees the builder for some reason;
+                if (conn.builder != null) {
+                    conn.builder.?.*.deinit(self.arena.*);
+                }
                 print("\nClosing connection: {d}", .{conn.fd});
                 posix.close(conn.fd);
                 _ = fd_conns.swapRemove(i);
@@ -340,11 +347,13 @@ fn parseCaches(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) 
             .lpushmany => |v| {
                 const hash = hashKey(v.dll_name);
                 const idx = hash % caches.len;
+                print("\nCache{d}", .{idx});
                 try worker(cmd, conn, caches.*[idx], arena);
             },
             .lrange => |v| {
                 const hash = hashKey(v.dll_name);
                 const idx = hash % caches.len;
+                print("\nCache{d}", .{idx});
                 try worker(cmd, conn, caches.*[idx], arena);
             },
         }

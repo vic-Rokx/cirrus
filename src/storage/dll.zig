@@ -53,8 +53,10 @@ pub const DLinkedList = struct {
         if (self.current_node == null) {
             self.current_node = self.head.?;
             return self.current_node.?;
+        } else {
+            self.current_node = self.current_node.?.next;
+            return self.current_node;
         }
-        return self.current_node.?.next;
     }
 
     pub fn addBack(self: *Self, value: []const u8) !void {

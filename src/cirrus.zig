@@ -152,6 +152,10 @@ pub fn run(self: *Self) !void {
 
             if (conn.state == State.End) {
                 assert(conn.fd > 0, "Not valid connection fd");
+                // If you call conn.builder.?.len(), in a print; it frees the builder for some reason;
+                if (conn.builder != null) {
+                    conn.builder.?.*.deinit(self.arena.*);
+                }
                 print("\nClosing connection: {d}", .{conn.fd});
                 posix.close(conn.fd);
                 _ = fd_conns.swapRemove(i);

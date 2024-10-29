@@ -10,7 +10,10 @@ const State = @import("../cluster.zig").State;
 const DLL = @import("../storage/dll.zig").DLinkedList;
 const Types = @import("../types.zig");
 const Parser = @import("../parser.zig");
-pub fn acceptNewConnection(fd_conns: *std.ArrayList(*Conn), socket_fd: posix.socket_t) !void {
+pub fn acceptNewConnection(
+    fd_conns: *std.ArrayList(*Conn),
+    socket_fd: posix.socket_t,
+) !void {
     var client_addr: std.net.Address = undefined;
     var client_addr_len: u32 = @intCast(@sizeOf(@TypeOf(client_addr.any)));
     const conn_fd = posix.accept(socket_fd, &client_addr.any, &client_addr_len, 0) catch |err| {
@@ -37,6 +40,7 @@ pub fn acceptNewConnection(fd_conns: *std.ArrayList(*Conn), socket_fd: posix.soc
         .wbuf_sent = 0,
         .wbuf = undefined,
         .buffer = undefined,
+        .builder = null,
         .start_time = 0,
         .last_check = 0,
     };
@@ -86,7 +90,7 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
             conn.buffer = "PONG";
         },
         .echo => |v| {
-            const response = try std.fmt.allocPrint(std.heap.c_allocator, "${}\r\n{s}\r\n", .{ v.len, v });
+            const response = try std.fmt.allocPrint(arena.*, "${}\r\n{s}\r\n", .{ v.len, v });
             conn.buffer = response;
         },
         .set => |v| {
@@ -95,18 +99,16 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                 return;
             };
             conn.buffer = "+OK";
-            // arena.free(v.key);
-            // arena.free(v.value.string);
         },
         .get => |v| {
             const entry = cache.*.get(v.key);
             if (entry != null) {
                 const response = try std.fmt.allocPrint(
-                    std.heap.c_allocator,
+                    arena.*,
                     "${}\r\n{s}\r\n",
                     .{ entry.?.value.string.len, entry.?.value.string },
                 );
-                // arena.free(v.key);
+                arena.free(v.key);
                 conn.buffer = response;
             } else {
                 conn.buffer = "-ERROR";
@@ -117,7 +119,7 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
             var response: []const u8 = ":1\r\n";
             if (entry == null) {
                 const dll = try arena.create(DLL);
-                dll.* = DLL.init(std.heap.page_allocator);
+                dll.* = DLL.init(arena.*);
                 try dll.*.addFront(v.dll_new_value);
                 const dll_resp = Types.RESP{ .dll = dll };
                 try cache.*.set(v.dll_name, dll_resp);
@@ -126,13 +128,11 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                 try dll.*.addFront(v.dll_new_value);
 
                 response = try std.fmt.allocPrint(
-                    std.heap.c_allocator,
+                    arena.*,
                     ":{}\r\n",
                     .{dll.size},
                 );
             }
-            // arena.free(v.dll_name);
-            // arena.free(v.dll_new_value);
             conn.buffer = response;
         },
         .lpushmany => |v| {
@@ -140,7 +140,7 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
             var response: []const u8 = ":1\r\n";
             if (entry == null) {
                 const dll = try arena.create(DLL);
-                dll.* = DLL.init(std.heap.page_allocator);
+                dll.* = DLL.init(arena.*);
                 for (v.dll_values) |value| {
                     try dll.*.addBack(value);
                 }
@@ -153,13 +153,11 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                 }
 
                 response = try std.fmt.allocPrint(
-                    std.heap.c_allocator,
+                    arena.*,
                     ":{}\r\n",
                     .{dll.size},
                 );
             }
-            // arena.free(v.dll_name);
-            // arena.free(v.dll_values);
             conn.buffer = response;
         },
         .lrange => |v| {
@@ -169,17 +167,16 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                 var size: usize = dll.*.size;
                 const start: usize = @intCast(v.start_index);
                 const additional: usize = @intCast(@abs(v.end_range));
-
                 if (additional > size or start >= size) {
                     conn.buffer = "-ERROR INDEX RANGE";
                 } else {
                     if (v.end_range < -1) {
                         size -= additional - 1;
                     }
-
-                    var builder: std.RingBuffer = try std.RingBuffer.init(std.heap.c_allocator, 1024);
+                    // var builder: std.RingBuffer = try std.RingBuffer.init(arena.*, 1024);
+                    var builder = try std.RingBuffer.init(arena.*, 1024);
                     const addition: []const u8 = try std.fmt.allocPrint(
-                        std.heap.c_allocator,
+                        arena.*,
                         "*{}\r\n",
                         .{size},
                     );
@@ -188,7 +185,7 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                     for (0..size) |i| {
                         if (i >= start) {
                             const value: []const u8 = try std.fmt.allocPrint(
-                                std.heap.c_allocator,
+                                arena.*,
                                 "${}\r\n{s}\r\n",
                                 .{ size, node.*.value },
                             );
@@ -199,6 +196,11 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                         }
                     }
                     const len = builder.len();
+                    conn.builder = &builder;
+                    if (conn.builder != null) {
+                        print("HELLLLLL", .{});
+                    }
+                    // conn.builder.?.deinit(arena.*);
                     conn.buffer = builder.data[0..len];
                 }
             } else {

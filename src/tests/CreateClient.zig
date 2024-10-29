@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+// const utils = @import("../utils/index.zig");
 
 const ClientError = error{
     HeaderMalformed,
@@ -23,25 +24,12 @@ const Conn = struct {
 
 const Self = @This();
 client_addr: std.net.Address,
-// client_fd: posix.socket_t,
 // const nw = try posix.write(client_fd, "*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$3\r\nVic\r\n");
 
 pub fn createClient(port: u16) !Self {
     const client_addr = try std.net.Address.parseIp4("127.0.0.1", port);
-    // const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, posix.IPPROTO.TCP);
-    // var option_value: i32 = 1; // Enable the option
-    // const option_value_bytes = std.mem.asBytes(&option_value);
-    // try posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, option_value_bytes);
-    // posix.connect(client_fd, &client_addr.any, client_addr.getOsSockLen()) catch |err| {
-    //     if (err == error.ConnectionRefused) {
-    //         return ClientError.ConnectionRefused;
-    //     } else {
-    //         return ClientError.ServerError;
-    //     }
-    // };
     return Self{
         .client_addr = client_addr,
-        // .client_fd = client_fd,
     };
 }
 
@@ -52,8 +40,10 @@ fn createConn(self: Self) !c_int {
     try posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, option_value_bytes);
     posix.connect(client_fd, &self.client_addr.any, self.client_addr.getOsSockLen()) catch |err| {
         if (err == error.ConnectionRefused) {
+            // utils.error_print_str("Error: Cache connection not available");
             return ClientError.ConnectionRefused;
         } else {
+            // utils.error_print_str("Error: Cache Internal server error");
             return ClientError.ServerError;
         }
     };
@@ -66,7 +56,6 @@ pub fn close(self: Self) void {
 
 pub fn ping(self: Self) ![]const u8 {
     const client_fd = try self.createConn();
-    // defer posix.close(self.client_fd);
     std.debug.print("Nimbus client fd: {d}\n", .{client_fd});
     const nw = try posix.write(client_fd, "$4\r\nPING\r\n");
     if (nw < 0) {
@@ -84,20 +73,20 @@ pub fn ping(self: Self) ![]const u8 {
 }
 
 pub fn echo(self: Self, value: []const u8) ![]const u8 {
-    _ = try self.createConn();
-    defer posix.close(self.client_fd);
+    const client_fd = try self.createConn();
+    defer posix.close(client_fd);
     const req = try std.fmt.allocPrint(
         std.heap.c_allocator,
         "*2\r\n$4\r\nECHO\r\n${d}\r\n{s}\r\n",
         .{ value.len, value },
     );
 
-    const nw = try posix.write(self.client_fd, req);
+    const nw = try posix.write(client_fd, req);
     if (nw < 0) {
         return ClientError.RequestNotSupported;
     }
     var rbuf: [1024]u8 = undefined;
-    const nr = try posix.read(self.client_fd, &rbuf);
+    const nr = try posix.read(client_fd, &rbuf);
 
     const resp = rbuf[0..nr];
     if (std.mem.eql(u8, resp, "-ERROR")) {
@@ -109,7 +98,7 @@ pub fn echo(self: Self, value: []const u8) ![]const u8 {
     return s;
 }
 
-pub fn set(self: Self, key: []const u8, value: []const u8) !void {
+pub fn set(self: Self, key: []const u8, value: []const u8) ![]const u8 {
     const client_fd = try self.createConn();
     const response = try std.fmt.allocPrint(
         std.heap.c_allocator,
@@ -130,6 +119,10 @@ pub fn set(self: Self, key: []const u8, value: []const u8) !void {
     }
 
     std.debug.print("\nserver response: {s}", .{rbuf[0..nr]});
+
+    const s = try std.heap.c_allocator.alloc(u8, nr);
+    std.mem.copyForwards(u8, s, rbuf[0..nr]);
+    return s;
     // return ClientError.Success;
 }
 
@@ -153,8 +146,8 @@ pub fn get(self: Self, key: []const u8) ![]const u8 {
         return ClientError.ValueNotFound;
     }
 
-    const s = try std.heap.c_allocator.alloc(u8, nr - 6);
-    std.mem.copyForwards(u8, s, rbuf[4 .. nr - 2]);
+    const s = try std.heap.c_allocator.alloc(u8, nr - 4);
+    std.mem.copyForwards(u8, s, rbuf[4..nr]);
     return s;
 }
 
@@ -162,9 +155,7 @@ pub fn get(self: Self, key: []const u8) ![]const u8 {
 // *4\r\n$5\r\nLPUSH\r\n$6\r\nmylist\r\n$4\r\nfive\r\n$3\r\nsix\r\n
 pub fn lpush(self: Self, comptime num_items: usize, llname: []const u8, items: []const []const u8) ![]const u8 {
     const client_fd = try self.createConn();
-    // defer posix.close(self.client_fd);
-    std.debug.print("Nimbus client fd: {d}\n", .{client_fd});
-
+    // defer posix.close(client_fd);
     const precursor = try std.fmt.allocPrint(
         std.heap.c_allocator,
         "*{d}\r\n$5\r\nLPUSH\r\n${d}\r\n{s}\r\n",
@@ -190,8 +181,6 @@ pub fn lpush(self: Self, comptime num_items: usize, llname: []const u8, items: [
         .{ precursor, input },
     );
 
-    // const nw = try posix.write(self.client_fd, "$4\r\nPING\r\n");
-
     // _ = try posix.write(self.client_fd, "*5\r\n$5\r\nLPUSH\r\n$6\r\nmylist\r\n$4\r\nfive\r\n$3\r\nsix\r\n$4\r\nfour\r\n");
     const nw = try posix.write(client_fd, final);
     if (nw < 0) {
@@ -205,15 +194,13 @@ pub fn lpush(self: Self, comptime num_items: usize, llname: []const u8, items: [
         return ClientError.ValueNotFound;
     }
 
-    // std.debug.print("\n{s}", .{rbuf[0..nr]});
-
-    // const s = try std.heap.c_allocator.alloc(u8, nr - 1);
-    // std.mem.copyForwards(u8, s, rbuf[1..nr]);
-    return "";
+    const s = try std.heap.c_allocator.alloc(u8, nr - 1);
+    std.mem.copyForwards(u8, s, rbuf[1..nr]);
+    return s;
 }
 
 // "*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$1\r\n0\r\n$2\r\n-1\r\n"
-pub fn lrange(self: Self, ll_name: []const u8, start: []const u8, end: []const u8) ![]const u8 {
+pub fn lrange(self: Self, ll_name: []const u8, start: []const u8, end: []const u8) !void {
     const client_fd = try self.createConn();
     // defer posix.close(client_fd);
     const req = try std.fmt.allocPrint(
@@ -238,8 +225,13 @@ pub fn lrange(self: Self, ll_name: []const u8, start: []const u8, end: []const u
     }
 
     std.debug.print("\nresponse: {s}", .{rbuf[0..nr]});
+}
 
-    const s = try std.heap.c_allocator.alloc(u8, nr - 1);
-    std.mem.copyForwards(u8, s, rbuf[1..nr]);
-    return s;
+test "Test Cache and Snapshot" {
+    const cache = try Self.createClient(6379);
+    // var str_arr = [_][]const u8{ "one", "two", "three" };
+    // _ = try cache.lpush(3, "mylist", &str_arr);
+    _ = try cache.set("name", "Vic");
+    _ = try cache.lrange("mylist", "0", "-1");
+    // _ = try cache.get("name");
 }

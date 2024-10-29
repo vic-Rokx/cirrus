@@ -161,16 +161,16 @@ fn parseValue(self: *Self, value_line: []const u8) !Types.RESP {
         },
         .string => {
             const value = value_line_itr.next().?;
-            std.debug.print("\nvalue_string:{s}", .{value});
             entry = Types.RESP{ .string = value };
         },
         .dll => {
-            var dll = DLL.init(self.arena.*);
+            const dll = try self.arena.*.create(DLL);
+            dll.* = DLL.init(std.heap.page_allocator);
             while (value_line_itr.next()) |elem| {
-                std.debug.print("\n{s}", .{elem});
                 try dll.addBack(elem);
             }
-            entry = Types.RESP{ .dll = &dll };
+
+            entry = Types.RESP{ .dll = dll };
         },
     }
     return entry;
