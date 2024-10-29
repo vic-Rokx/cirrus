@@ -13,6 +13,7 @@ const Conn = @import("cluster.zig").Conn;
 const State = @import("cluster.zig").State;
 const worker = connections.worker;
 const parseCommand = connections.parseCommand;
+const poller = @import("poller.zig").pollConnections;
 
 const DEFAULT_PORT: usize = 6379;
 
@@ -32,6 +33,10 @@ pub const Config = struct {
     addr: []const u8,
     arena: *std.mem.Allocator,
     replicas: u16,
+};
+
+const CacheError = error{
+    FailedToAllocMemForSingleCache,
 };
 
 pub fn init(target: *Self, config: Config) !void {
@@ -78,119 +83,11 @@ pub fn run(self: *Self) !void {
     defer poll_args.deinit();
     var fd_conns = std.ArrayList(*Conn).init(self.arena.*);
     defer fd_conns.deinit();
+    var caches = self.arena.*.alloc(*Cache, 1) catch {
+        std.debug.print("\nFailed to alloc memory for caches", .{});
+        return CacheError.FailedToAllocMemForSingleCache;
+    };
+    caches[0] = &self.cache;
 
-    while (true) {
-        poll_args.clearRetainingCapacity();
-        const fd: posix.pollfd = .{
-            .fd = socket_fd,
-            .events = posix.POLL.IN,
-            .revents = 0,
-        };
-        try poll_args.append(fd);
-        assert(poll_args.items.len > 0, "no connections");
-        for (fd_conns.items) |conn| {
-            var events: i16 = posix.POLL.OUT;
-            if (conn.state == State.REQ) {
-                events = posix.POLL.IN;
-            }
-
-            assert(conn.fd > 1, "File descriptor is less than 0");
-            var pfd: posix.pollfd = .{
-                .fd = conn.fd,
-                .events = events,
-                .revents = 0,
-            };
-
-            pfd.events = pfd.events | posix.POLL.ERR;
-
-            try poll_args.append(pfd);
-        }
-
-        // std.time.sleep(1_000_000_000);
-        const rv = try posix.poll(poll_args.items, 1000);
-
-        if (rv < 0) {
-            return error.PollingFailed;
-        }
-
-        if (poll_args.items.len > 0) {
-            for (poll_args.items, 0..) |item, i| {
-                if (i == 0) {
-                    continue;
-                }
-                if (item.revents & posix.POLL.IN != 0 or item.revents & posix.POLL.OUT != 0) {
-                    print("\nClient fd, {d} {d}", .{ std.time.nanoTimestamp(), self.port });
-                    if (i - 1 >= fd_conns.items.len) {
-                        return;
-                    }
-                    const conn = fd_conns.items[i - 1];
-                    print("\nClient fd, {d}", .{conn.fd});
-                    // std.time.sleep(1_000_000_000);
-
-                    conn.*.start_time = std.time.nanoTimestamp();
-
-                    assert(conn.fd > 0, "No valid connection");
-                    connectionIo(conn, &self.cache, self.arena) catch |err| {
-                        print("\nState machine event error: {any}", .{err});
-                        return error.ReadFailed;
-                    };
-                }
-            }
-        }
-
-        // Here we loop the responses
-        for (fd_conns.items, 0..) |_, i| {
-            var conn = fd_conns.items[i].*;
-
-            if (conn.state == State.Processing) {
-                try connectionIo(&conn, &self.cache, self.arena);
-            }
-
-            if (conn.state == State.RESP) {
-                try connectionIo(&conn, &self.cache, self.arena);
-            }
-
-            if (conn.state == State.End) {
-                assert(conn.fd > 0, "Not valid connection fd");
-                // If you call conn.builder.?.len(), in a print; it frees the builder for some reason;
-                if (conn.builder != null) {
-                    conn.builder.?.*.deinit(self.arena.*);
-                }
-                print("\nClosing connection: {d}", .{conn.fd});
-                posix.close(conn.fd);
-                _ = fd_conns.swapRemove(i);
-            }
-        }
-
-        if (poll_args.items[0].revents == 1) {
-            print("\nRecieved a new connection", .{});
-            try connections.acceptNewConnection(&fd_conns, socket_fd);
-        }
-    }
-}
-
-fn connectionIo(conn: *Conn, cache: *Cache, arena: *std.mem.Allocator) !void {
-    switch (conn.state) {
-        State.REQ => {
-            print("\nreq state\n", .{});
-            try connections.stateReq(conn);
-        },
-        State.Processing => {
-            const command = parseCommand(conn, arena) catch {
-                return error.ReadFailed;
-            };
-            if (command) |cmd| {
-                worker(cmd, conn, cache, arena) catch |err| {
-                    print("\nWorker event error: {any}", .{err});
-                    return error.ReadFailed;
-                };
-            }
-            conn.state = State.RESP;
-            return;
-        },
-        State.RESP => {
-            try connections.stateResp(conn);
-        },
-        State.End => {},
-    }
+    try poller(socket_fd, &poll_args, &fd_conns, self.port, &caches, self.arena);
 }

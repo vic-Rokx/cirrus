@@ -18,6 +18,7 @@ const snapCaches = @import("snapshot.zig").snapCaches;
 const loadCacheFromDisk = @import("snapshot.zig").loadCacheFromDisk;
 const SnapShotError = @import("snapshot.zig").SnapShotError;
 const SnapShot = @import("snapshot.zig");
+const poller = @import("poller.zig").pollConnections;
 
 const DEFAULT_PORT: usize = 6379;
 
@@ -62,6 +63,8 @@ caches: ?[]*Cache,
 caches_inst: ?[]*Cirrus,
 cluster_host: []const u8,
 cluster_port: u16,
+enable_snapshot: bool,
+enable_multithread: bool,
 
 const ClusterError = error{
     FailedToInitializeCache,
@@ -82,6 +85,8 @@ pub const ClusterConfig = struct {
     gpa: *std.mem.Allocator,
     cluster_host: []const u8,
     cluster_port: u16,
+    enable_snapshot: bool,
+    enable_multithread: bool,
 };
 
 pub fn init(target: *Self, config: ClusterConfig) !void {
@@ -95,6 +100,8 @@ pub fn init(target: *Self, config: ClusterConfig) !void {
         .caches_inst = null,
         .cluster_port = config.cluster_port,
         .cluster_host = config.cluster_host,
+        .enable_snapshot = config.enable_snapshot,
+        .enable_multithread = config.enable_multithread,
     };
 }
 pub fn deinit(self: *Self) !void {
@@ -178,9 +185,6 @@ pub fn run(self: *Self) !void {
     try posix.setsockopt(socket_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, option_value_bytes);
 
     try posix.bind(socket_fd, &ip_addr.any, ip_addr.getOsSockLen());
-    try posix.listen(socket_fd, 128);
-
-    std.debug.print("Running Cirrus Cluster on {}\n", .{ip_addr});
 
     // const reset = "\x1b[0m"; // ANSI escape code to reset color
     // const ascii_art =
@@ -192,11 +196,9 @@ pub fn run(self: *Self) !void {
     // ;
     // print("\n{s}{s}\n", .{ ascii_art, reset });
 
-    var snapshot: SnapShot = undefined;
-    snapshot.init(self.arena);
+    std.debug.print("Initializing Cirrus Cluster size {d}\n", .{self.cache_count});
     try self.createCluster();
     try self.populateCacheArray();
-    try self.populateCacheData(&snapshot);
 
     var threads: []*std.Thread = undefined;
     helpers.assert_cm(self.caches_inst != null, "Cache Instances are not initilized,\nPlease run createCluster...");
@@ -211,173 +213,20 @@ pub fn run(self: *Self) !void {
     }
 
     // Initialize SnapShot
-    // _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
+    if (self.enable_snapshot) {
+        var snapshot: SnapShot = undefined;
+        snapshot.init(self.arena);
+        try self.populateCacheData(&snapshot);
+        _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
+    }
 
     var poll_args = std.ArrayList(posix.pollfd).init(self.arena.*);
     defer poll_args.deinit();
     var fd_conns = std.ArrayList(*Conn).init(self.arena.*);
     defer fd_conns.deinit();
 
-    while (true) {
-        poll_args.clearRetainingCapacity();
-        const fd: posix.pollfd = .{
-            .fd = socket_fd,
-            .events = posix.POLL.IN,
-            .revents = 0,
-        };
-        try poll_args.append(fd);
-        assert(poll_args.items.len > 0, "no connections");
-        for (fd_conns.items) |conn| {
-            var events: i16 = posix.POLL.OUT;
-            if (conn.state == State.REQ) {
-                events = posix.POLL.IN;
-            }
+    try posix.listen(socket_fd, 128);
+    std.debug.print("Cirrus Cluster listening on {}\n", .{ip_addr});
 
-            assert(conn.fd > 1, "File descriptor is less than 0");
-            var pfd: posix.pollfd = .{
-                .fd = conn.fd,
-                .events = events,
-                .revents = 0,
-            };
-
-            pfd.events = pfd.events | posix.POLL.ERR;
-
-            try poll_args.append(pfd);
-        }
-
-        const rv = try posix.poll(poll_args.items, 1000);
-
-        if (rv < 0) {
-            return error.PollingFailed;
-        }
-
-        if (poll_args.items.len > 0) {
-            for (poll_args.items, 0..) |item, i| {
-                if (i == 0) {
-                    continue;
-                }
-                if (item.revents & posix.POLL.IN != 0 or item.revents & posix.POLL.OUT != 0) {
-                    print("\nClient fd, {d} {d}", .{ std.time.nanoTimestamp(), self.cluster_port });
-                    if (i - 1 >= fd_conns.items.len) {
-                        return;
-                    }
-                    const conn = fd_conns.items[i - 1];
-                    print("\nClient fd, {d}", .{conn.fd});
-                    // std.time.sleep(1_000_000_000);
-
-                    conn.*.start_time = std.time.nanoTimestamp();
-
-                    assert(conn.fd > 0, "No valid connection");
-                    connectionIo(conn, &self.caches.?, self.arena) catch |err| {
-                        print("\nState machine event error: {any}", .{err});
-                        return error.ReadFailed;
-                    };
-                }
-            }
-        }
-
-        // Here we loop the responses
-        for (fd_conns.items, 0..) |_, i| {
-            var conn = fd_conns.items[i].*;
-
-            if (conn.state == State.Processing) {
-                try connectionIo(&conn, &self.caches.?, self.arena);
-            }
-
-            if (conn.state == State.RESP) {
-                try connectionIo(&conn, &self.caches.?, self.arena);
-            }
-
-            if (conn.state == State.End) {
-                assert(conn.fd > 0, "Not valid connection fd");
-                // If you call conn.builder.?.len(), in a print; it frees the builder for some reason;
-                if (conn.builder != null) {
-                    conn.builder.?.*.deinit(self.arena.*);
-                }
-                print("\nClosing connection: {d}", .{conn.fd});
-                posix.close(conn.fd);
-                _ = fd_conns.swapRemove(i);
-            }
-        }
-
-        if (poll_args.items[0].revents == 1) {
-            print("\nRecieved a new connection", .{});
-            try connections.acceptNewConnection(&fd_conns, socket_fd);
-        }
-    }
-}
-
-fn hashKey(key: []const u8) u32 {
-    var h: u32 = 5381;
-    for (key) |char| {
-        h = ((h << 5) +% h) +% char;
-    }
-    h = h *% 2654435761;
-
-    return h;
-}
-
-fn parseCaches(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
-    const command = try parseCommand(conn, arena);
-    if (command) |cmd| {
-        switch (cmd) {
-            .ping => {
-                try worker(cmd, conn, caches.*[0], arena);
-            },
-            .echo => |v| {
-                const hash = hashKey(v);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .set => |v| {
-                const hash = hashKey(v.key);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .get => |v| {
-                const hash = hashKey(v.key);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .lpush => |v| {
-                const hash = hashKey(v.dll_name);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .lpushmany => |v| {
-                const hash = hashKey(v.dll_name);
-                const idx = hash % caches.len;
-                print("\nCache{d}", .{idx});
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .lrange => |v| {
-                const hash = hashKey(v.dll_name);
-                const idx = hash % caches.len;
-                print("\nCache{d}", .{idx});
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-        }
-    }
-
-    conn.state = State.RESP;
-    return;
-}
-
-fn connectionIo(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
-    switch (conn.state) {
-        State.REQ => {
-            print("\nreq state\n", .{});
-            try connections.stateReq(conn);
-        },
-        State.Processing => {
-            parseCaches(conn, caches, arena) catch |err| {
-                print("\nWorker event error: {any}", .{err});
-                return error.ReadFailed;
-            };
-        },
-        State.RESP => {
-            try connections.stateResp(conn);
-        },
-        State.End => {},
-    }
+    try poller(socket_fd, &poll_args, &fd_conns, self.cluster_port, &self.caches.?, self.arena);
 }

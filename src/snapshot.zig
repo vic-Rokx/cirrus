@@ -100,7 +100,6 @@ fn parseKey(key_line: []const u8) []const u8 {
     _ = key_line_itr.next();
 
     const key = key_line_itr.next().?;
-    std.debug.print("\nkey:{s}", .{key});
     return key;
 }
 
@@ -120,7 +119,6 @@ fn parseValue(self: *Self, value_line: []const u8) !Types.RESP {
     switch (value_type_enum.?) {
         .int => {
             const value = try std.fmt.parseInt(i32, value_line_itr.next().?, 10);
-            std.debug.print("\nvalue_int:{d}", .{value});
             entry = Types.RESP{ .int = value };
         },
         .array => {
@@ -140,16 +138,10 @@ fn parseValue(self: *Self, value_line: []const u8) !Types.RESP {
                 const value_buf = value_line_itr.next().?;
                 switch (elem_type_enum.?) {
                     .int => {
-                        std.debug.print("\nvalue_type:{s}", .{elem});
-                        std.debug.print("\nvalue_type:{s}", .{elem});
                         const value = try std.fmt.parseInt(i32, value_buf, 10);
-                        std.debug.print("\nvalue_int:{d}", .{value});
                         resp_array.array.values[idx] = Types.RESP{ .int = value };
                     },
                     .string => {
-                        std.debug.print("\nvalue_string:{s}", .{
-                            elem,
-                        });
                         resp_array.array.values[idx] = Types.RESP{ .string = value_buf };
                     },
                     .array => {},
@@ -199,14 +191,6 @@ pub fn loadCacheFromDisk(self: *Self, filename: []const u8, empty_cache: *Cache)
 
         try empty_cache.set(key, value);
         lineIndex += 1;
-    }
-}
-
-fn snap(cacheName: []const u8, cache: *Cache) !void {
-    while (true) {
-        std.debug.print("\nSnapping the cache", .{cacheName});
-        try saveToFile(cacheName, cache);
-        std.time.sleep(60_000_000_000);
     }
 }
 

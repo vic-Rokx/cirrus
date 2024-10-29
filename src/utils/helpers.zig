@@ -47,6 +47,16 @@ pub fn djbHash(key: []const u8) u32 {
     return h;
 }
 
+pub fn hashKey(key: []const u8) u32 {
+    var h: u32 = 5381;
+    for (key) |char| {
+        h = ((h << 5) +% h) +% char;
+    }
+    h = h *% 2654435761;
+
+    return h;
+}
+
 pub fn generateSessionId() [32]u8 {
     var rng = std.crypto.random;
     var session_id: [32]u8 = undefined;

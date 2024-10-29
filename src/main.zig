@@ -41,12 +41,14 @@ fn createCluster() !void {
     };
 
     const config_cluster = Cluster.ClusterConfig{
-        .cache_count = 3,
+        .cache_count = cache_configs.len,
         .replica_count = 2,
         .cache_configs = &cache_configs,
         .gpa = &allocator,
         .cluster_host = "127.0.0.1",
         .cluster_port = 6379,
+        .enable_snapshot = true,
+        .enable_multithread = false,
     };
     var cluster: Cluster = undefined;
     try cluster.init(config_cluster);
