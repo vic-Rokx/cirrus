@@ -48,7 +48,7 @@ pub const Conn = struct {
     wbuf_sent: usize,
     wbuf: [1024]u8,
     buffer: []const u8,
-    builder: ?*std.RingBuffer,
+    builder: *std.RingBuffer,
     start_time: i128,
     last_check: i128,
 };
@@ -109,12 +109,21 @@ pub fn deinit(self: *Self) !void {
         return;
     }
     for (self.caches_inst.?) |cache_inst| {
-        try cache_inst.deinit();
+        try cache_inst.*.deinit();
         self.arena.destroy(cache_inst); // Deallocate the cache
     }
-
-    self.arena.free(self.caches.?); // Deinitialize the ArrayList
     self.arena.free(self.caches_inst.?); // Deinitialize the ArrayList
+    //
+    if (self.caches == null) {
+        return;
+    }
+
+    // for (self.caches.?) |cache| {
+    // cache.*.deinit();
+    // self.arena.destroy(cache); // Deallocate the cache
+    // }
+    // //
+    self.arena.free(self.caches.?); // Deinitialize the ArrayList
 }
 
 pub fn createCluster(self: *Self) !void {
@@ -132,11 +141,24 @@ pub fn createCluster(self: *Self) !void {
             .port = cache_config.port,
             .arena = self.arena,
             .replicas = self.replica_count,
+            .enabled_multithread = self.enable_multithread,
         };
 
         try cache_ptr.*.init(config);
         self.caches_inst.?[i] = cache_ptr;
     }
+}
+
+pub fn deinitCluster(self: *Self) !void {
+    if (self.caches_inst == null) {
+        return;
+    }
+
+    for (self.caches_inst.?) |cache_inst| {
+        try cache_inst.*.deinit();
+        self.arena.destroy(cache_inst); // Deallocate the cache
+    }
+    self.arena.free(self.caches_inst.?); // Deinitialize the ArrayList
 }
 
 fn runCache(cache_inst: *Cirrus) !void {
@@ -154,10 +176,22 @@ pub fn populateCacheArray(self: *Self) !void {
     }
 }
 
+pub fn deinitCacheArray(self: *Self) !void {
+    if (self.caches == null) {
+        return;
+    }
+
+    // for (self.caches.?) |cache_inst| {
+    //     try cache_inst.*.deinit();
+    //     self.arena.destroy(cache_inst); // Deallocate the cache
+    // }
+    self.arena.free(self.caches.?); // Deinitialize the ArrayList
+}
+
 fn populateCacheData(self: *Self, snapshot: *SnapShot) !void {
     for (self.caches.?, 0..) |cache, i| {
         var buf_size: [256]u8 = undefined;
-        const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_cache_{}.dat", .{i});
+        const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_caches/snapped_cache_{}.dat", .{i});
         snapshot.loadCacheFromDisk(cacheName, cache) catch |err| {
             switch (err) {
                 SnapShotError.FailedToLoadFile => {
@@ -176,6 +210,18 @@ fn populateCacheData(self: *Self, snapshot: *SnapShot) !void {
 }
 
 pub fn run(self: *Self) !void {
+    var poll_args = std.ArrayList(posix.pollfd).init(self.arena.*);
+    defer poll_args.deinit();
+    var fd_conns = std.ArrayList(*Conn).init(self.arena.*);
+    defer fd_conns.deinit();
+
+    var threads: []*std.Thread = undefined;
+    threads = self.arena.*.alloc(*std.Thread, self.cache_count) catch {
+        std.debug.print("\nFailed to alloc memory for caches", .{});
+        return ClusterError.FailedToAllocMemForCaches;
+    };
+    defer self.arena.*.free(threads);
+
     const ip_addr = try std.net.Address.parseIp4(self.cluster_host, self.cluster_port);
     const socket_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
     // print("Socket fd: {d}\n", .{socket_fd});
@@ -198,18 +244,18 @@ pub fn run(self: *Self) !void {
 
     std.debug.print("Initializing Cirrus Cluster size {d}\n", .{self.cache_count});
     try self.createCluster();
+    defer (self.deinitCluster()) catch @panic("Could not deinit cluster");
     try self.populateCacheArray();
+    defer (self.deinitCacheArray()) catch @panic("Could not deinit Cache array");
 
-    var threads: []*std.Thread = undefined;
     helpers.assert_cm(self.caches_inst != null, "Cache Instances are not initilized,\nPlease run createCluster...");
     helpers.assert_cm(self.caches != null, "Caches are not initilized,\nPlease run createCluster...");
-    threads = self.arena.*.alloc(*std.Thread, 3) catch {
-        std.debug.print("\nFailed to alloc memory for caches", .{});
-        return ClusterError.FailedToAllocMemForCaches;
-    };
+
     for (self.caches_inst.?, 0..) |cache, i| {
-        var thread = try std.Thread.spawn(.{}, runCache, .{cache});
-        threads[i] = &thread;
+        // _ = try std.Thread.spawn(.{}, runCache, .{self.caches_inst.?[0]});
+        var cache_thread = try std.Thread.spawn(.{}, runCache, .{cache});
+        threads[i] = &cache_thread;
+        defer cache_thread.join();
     }
 
     // Initialize SnapShot
@@ -218,15 +264,82 @@ pub fn run(self: *Self) !void {
         snapshot.init(self.arena);
         try self.populateCacheData(&snapshot);
         _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
+        // defer snap_thread.join();
     }
-
-    var poll_args = std.ArrayList(posix.pollfd).init(self.arena.*);
-    defer poll_args.deinit();
-    var fd_conns = std.ArrayList(*Conn).init(self.arena.*);
-    defer fd_conns.deinit();
 
     try posix.listen(socket_fd, 128);
     std.debug.print("Cirrus Cluster listening on {}\n", .{ip_addr});
 
-    try poller(socket_fd, &poll_args, &fd_conns, self.cluster_port, &self.caches.?, self.arena);
+    try poller(socket_fd, &poll_args, &fd_conns, &self.caches.?, self.arena);
+}
+
+test "test memory leaks cluster init" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer if (gpa.deinit() != .ok) @panic("Memmory leak...");
+
+    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // defer arena.deinit();
+    var arena = gpa.allocator();
+
+    const cache_configs = [_]CacheConfig{
+        CacheConfig{
+            .port = 7000,
+            .address = "127.0.0.1",
+        },
+        CacheConfig{
+            .port = 7001,
+            .address = "127.0.0.1",
+        },
+        CacheConfig{
+            .port = 7002,
+            .address = "127.0.0.1",
+        },
+    };
+
+    const config_cluster = ClusterConfig{
+        .cache_count = cache_configs.len,
+        .replica_count = 2,
+        .cache_configs = &cache_configs,
+        .gpa = &arena,
+        .cluster_host = "127.0.0.1",
+        .cluster_port = 6379,
+        .enable_snapshot = true,
+        .enable_multithread = false,
+    };
+    var cluster: Self = undefined;
+    try cluster.init(config_cluster);
+
+    const ip_addr = try std.net.Address.parseIp4(cluster.cluster_host, cluster.cluster_port);
+    const socket_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
+    // print("Socket fd: {d}\n", .{socket_fd});
+    defer posix.close(socket_fd);
+
+    var poll_args = std.ArrayList(posix.pollfd).init(arena);
+    defer poll_args.deinit();
+    var fd_conns = std.ArrayList(*Conn).init(arena);
+    defer fd_conns.deinit();
+
+    var threads: []*std.Thread = undefined;
+    threads = arena.alloc(*std.Thread, 3) catch {
+        std.debug.print("\nFailed to alloc memory for caches", .{});
+        return ClusterError.FailedToAllocMemForCaches;
+    };
+
+    defer arena.free(threads);
+    try cluster.createCluster();
+    defer (cluster.deinitCluster()) catch @panic("Could not deinit cluster");
+    try cluster.populateCacheArray();
+    defer (cluster.deinitCacheArray()) catch @panic("Could not deinit Cache array");
+
+    for (cluster.caches_inst.?, 0..) |cache, i| {
+        // _ = try std.Thread.spawn(.{}, runCache, .{self.caches_inst.?[0]});
+        var cache_thread = try std.Thread.spawn(.{}, runCache, .{cache});
+        threads[i] = &cache_thread;
+        defer cache_thread.join();
+    }
+
+    try posix.listen(socket_fd, 128);
+    std.debug.print("Cirrus Cluster listening on {}\n", .{ip_addr});
+
+    // try poller(socket_fd, &poll_args, &fd_conns, &cluster.caches.?, cluster.arena);
 }

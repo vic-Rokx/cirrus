@@ -17,13 +17,25 @@ const poller = @import("poller.zig").pollConnections;
 
 const DEFAULT_PORT: usize = 6379;
 
+pub const CacheHealth = enum {
+    Alive,
+    Down,
+    Crashed,
+    Waiting,
+    Ready,
+};
+
 const Self = @This();
+socket_fd: posix.socket_t,
 address: []const u8,
 port: u16,
 arena: *std.mem.Allocator,
 addr: std.net.Address,
 replicas: u16,
 cache: Cache,
+enabled_multithread: bool,
+health: CacheHealth,
+caches: []*Cache,
 
 // For some reason we get an alias error when the buffer is set to 512
 // this could be do to the internal syscall made by the kernal "posix"
@@ -33,23 +45,29 @@ pub const Config = struct {
     addr: []const u8,
     arena: *std.mem.Allocator,
     replicas: u16,
+    enabled_multithread: bool,
 };
 
 const CacheError = error{
     FailedToAllocMemForSingleCache,
+    CacheCrashed,
 };
 
 pub fn init(target: *Self, config: Config) !void {
     const ip_addr = try std.net.Address.parseIp4(config.addr, config.port);
     var cache: Cache = undefined;
-    try cache.init(config.arena, config.replicas);
+    try cache.init(config.arena, config.replicas, config.enabled_multithread);
     target.* = .{
+        .socket_fd = undefined,
         .address = config.addr,
         .port = config.port,
         .arena = config.arena,
         .addr = ip_addr,
         .replicas = config.replicas,
         .cache = cache,
+        .enabled_multithread = config.enabled_multithread,
+        .health = CacheHealth.Ready,
+        .caches = undefined,
     };
 }
 
@@ -57,12 +75,38 @@ pub fn deinit(self: *Self) !void {
     self.cache.deinit();
 }
 
+fn healthCheck(self: *Self) !void {
+    while (true) {
+        std.time.sleep(5_000_000_000);
+        const client_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, posix.IPPROTO.TCP);
+        var option_value: i32 = 1; // Enable the option
+        const option_value_bytes = std.mem.asBytes(&option_value);
+        try posix.setsockopt(client_fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, option_value_bytes);
+        posix.connect(client_fd, &self.addr.any, self.addr.getOsSockLen()) catch |err| {
+            return err;
+        };
+
+        // const rng = std.crypto.random;
+        // const value = rng.int(u32);
+        // if (value % 5 == 0) { // Simulate a failure 20% of the time.
+        //     // std.debug.print("\nRunning ping to cache Failed", .{});
+        //     // std.debug.print("\nServer connection refused {}\n", .{self.addr});
+        //     // self.health = CacheHealth.Crashed;
+        //     // return CacheError.CacheCrashed;
+        // }
+        const nw = try posix.write(client_fd, "$4\r\nPING\r\n");
+        if (nw < 0) {
+            return CacheError.CacheCrashed;
+        }
+        std.debug.print("\nPing successful", .{});
+        posix.close(client_fd);
+    }
+}
+
 pub fn run(self: *Self) !void {
     const socket_fd = try posix.socket(posix.AF.INET, posix.SOCK.STREAM | posix.SOCK.NONBLOCK, posix.IPPROTO.TCP);
-    // print("Socket fd: {d}\n", .{socket_fd});
-    defer posix.close(socket_fd);
-
-    defer self.cache.deinit();
+    // self.socket_fd = socket_fd;
+    // defer posix.close(socket_fd);
 
     var option_value: i32 = 1; // Enable the option
     const option_value_bytes = std.mem.asBytes(&option_value);
@@ -78,16 +122,20 @@ pub fn run(self: *Self) !void {
     try posix.listen(socket_fd, 128);
 
     print("Running Nimbus Cache on {s}:{d}...\n", .{ self.address, self.port });
+    self.health = CacheHealth.Alive;
 
-    var poll_args = std.ArrayList(posix.pollfd).init(self.arena.*);
-    defer poll_args.deinit();
-    var fd_conns = std.ArrayList(*Conn).init(self.arena.*);
-    defer fd_conns.deinit();
-    var caches = self.arena.*.alloc(*Cache, 1) catch {
-        std.debug.print("\nFailed to alloc memory for caches", .{});
-        return CacheError.FailedToAllocMemForSingleCache;
-    };
-    caches[0] = &self.cache;
+    // var poll_args = std.ArrayList(posix.pollfd).init(self.arena.*);
+    // defer poll_args.deinit();
+    // var fd_conns = std.ArrayList(*Conn).init(self.arena.*);
+    // defer fd_conns.deinit();
+    // // self.caches = self.arena.*.alloc(*Cache, 1) catch {
+    // //     std.debug.print("\nFailed to alloc memory for caches", .{});
+    // //     return CacheError.FailedToAllocMemForSingleCache;
+    // // };
+    // var caches = [_]*Cache{&self.cache};
+    // caches[0] = &self.cache;
+    // self.caches = &caches;
 
-    try poller(socket_fd, &poll_args, &fd_conns, self.port, &caches, self.arena);
+    // _ = try std.Thread.spawn(.{}, healthCheck, .{self});
+    // try poller(socket_fd, &poll_args, &fd_conns, &self.caches, self.arena);
 }

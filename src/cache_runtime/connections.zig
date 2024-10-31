@@ -40,7 +40,7 @@ pub fn acceptNewConnection(
         .wbuf_sent = 0,
         .wbuf = undefined,
         .buffer = undefined,
-        .builder = null,
+        .builder = undefined,
         .start_time = 0,
         .last_check = 0,
     };
@@ -76,13 +76,14 @@ pub fn processConnection(conn: *Conn) void {
 }
 
 pub fn parseCommand(conn: *Conn, arena: *std.mem.Allocator) !?Command {
-    var msg = try Parser.parse(&conn.rbuf, arena);
+    print("\nParsing message: \n{s}", .{conn.rbuf[0..conn.rbuf_size]});
+    var msg = try Parser.parse(conn.*.rbuf[0..conn.rbuf_size], arena);
     const command = try msg.toCommand();
     return command;
 }
 
 pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocator) !void {
-    print("\nWorker parsing message: \n{s}", .{conn.rbuf[0..conn.rbuf_size]});
+    print("\nWorker parsing request... ", .{});
     // var current_time = std.time.nanoTimestamp();
 
     switch (cmd) {
@@ -113,6 +114,14 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
             } else {
                 conn.buffer = "-ERROR";
             }
+        },
+        .del => |v| {
+            const entry_exists = cache.*.del(v.key);
+            if (!entry_exists) {
+                conn.buffer = "-NULL";
+                return;
+            }
+            conn.buffer = "+OK";
         },
         .lpush => |v| {
             const entry = cache.*.get(v.dll_name);
@@ -157,6 +166,9 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                     ":{}\r\n",
                     .{dll.size},
                 );
+
+                const dll_resp = Types.RESP{ .dll = dll };
+                try cache.*.set(v.dll_name, dll_resp);
             }
             conn.buffer = response;
         },
@@ -197,9 +209,8 @@ pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocato
                     }
                     const len = builder.len();
                     conn.builder = &builder;
-                    if (conn.builder != null) {
-                        print("HELLLLLL", .{});
-                    }
+                    // print("\nBuilder address:{s}", .{conn.builder.?.data[0..len]});
+                    print("\nBuilder address:{d}", .{conn.builder.len()});
                     // conn.builder.?.deinit(arena.*);
                     conn.buffer = builder.data[0..len];
                 }
@@ -253,7 +264,7 @@ pub fn fillRBuffer(conn: *Conn) !void {
         conn.rbuf_size += rv;
     }
 
-    print("Filling the buffer", .{});
+    // print("Filling the buffer", .{});
     conn.state = State.Processing;
     return;
     // while (tryOneReq(conn)) {}

@@ -14,11 +14,6 @@ const worker = connections.worker;
 
 const Self = @This();
 
-pub const PollerError = error{
-    ConnectionIoCluster,
-    ConnectionIoSingle,
-};
-
 pub fn pollConnections(
     socket_fd: i32,
     poll_args: *std.ArrayList(posix.pollfd),
@@ -26,9 +21,6 @@ pub fn pollConnections(
     caches: *[]*Cache,
     arena: *std.mem.Allocator,
 ) !void {
-    // var poll_args = poll_args_ptr.*;
-    // var fd_conns = fd_conns_ptr.*;
-    // var caches = caches_ptr.*;
     while (true) {
         poll_args.clearRetainingCapacity();
         const fd: posix.pollfd = .{
@@ -67,12 +59,15 @@ pub fn pollConnections(
                 if (i == 0) {
                     continue;
                 }
+
+                // const conn_it = fd_conns.items[i].*;
                 if (item.revents & posix.POLL.IN != 0 or item.revents & posix.POLL.OUT != 0) {
+                    // print("\nClient fd, {d} {d}", .{ std.time.nanoTimestamp(), cluster_port });
                     if (i - 1 >= fd_conns.items.len) {
                         return;
                     }
                     const conn = fd_conns.items[i - 1];
-                    print("\nClient fd, {d}", .{conn.fd});
+                    // print("\nClient fd, {d}", .{conn.fd});
                     // std.time.sleep(1_000_000_000);
 
                     conn.*.start_time = std.time.nanoTimestamp();
@@ -88,31 +83,32 @@ pub fn pollConnections(
 
         // Here we loop the responses
         for (fd_conns.items, 0..) |_, i| {
-            var conn: Conn = undefined;
-            conn = fd_conns.items[i].*;
+            const conn = fd_conns.items[i];
 
-            if (conn.state == State.Processing) {
-                try connectionIo(&conn, caches, arena);
+            if (conn.*.state == State.Processing) {
+                try connectionIo(conn, caches, arena);
             }
 
-            if (conn.state == State.RESP) {
-                try connectionIo(&conn, caches, arena);
+            if (conn.*.state == State.RESP) {
+                try connectionIo(conn, caches, arena);
             }
 
-            if (conn.state == State.End) {
-                assert(conn.fd > 0, "Not valid connection fd");
+            if (conn.*.state == State.End) {
+                assert(conn.*.fd > 0, "Not valid connection fd");
                 // If you call conn.builder.?.len(), in a print; it frees the builder for some reason;
                 // if (conn.builder != null) {
-                //     conn.builder.?.*.deinit(arena.*);
+                // const len = conn.*.builder.*.len();
+                // print("\nBuilder address:{d}", .{len});
+                // conn.builder.deinit(arena.*);
                 // }
-                print("\nClosing connection: {d}", .{conn.fd});
-                posix.close(conn.fd);
+                print("\nClosing connection: {d}", .{conn.*.fd});
+                // posix.close(conn.*.fd);
                 _ = fd_conns.swapRemove(i);
             }
         }
 
         if (poll_args.items[0].revents == 1) {
-            print("\nRecieved a new connection", .{});
+            // print("\nRecieved a new connection", .{});
             try connections.acceptNewConnection(fd_conns, socket_fd);
         }
     }
@@ -129,7 +125,7 @@ fn connectionIo(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator)
 fn connectionIoSingleInst(conn: *Conn, cache: *Cache, arena: *std.mem.Allocator) !void {
     switch (conn.state) {
         State.REQ => {
-            print("\nreq state\n", .{});
+            // print("\nreq state\n", .{});
             try connections.stateReq(conn);
         },
         State.Processing => {
@@ -155,7 +151,7 @@ fn connectionIoSingleInst(conn: *Conn, cache: *Cache, arena: *std.mem.Allocator)
 fn connectionIoClusterInst(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
     switch (conn.state) {
         State.REQ => {
-            print("\nreq state\n", .{});
+            // print("\nreq state\n", .{});
             try connections.stateReq(conn);
         },
         State.Processing => {
@@ -206,13 +202,11 @@ fn parseCaches(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) 
             .lpushmany => |v| {
                 const hash = hashKey(v.dll_name);
                 const idx = hash % caches.len;
-                print("\nCache{d}", .{idx});
                 try worker(cmd, conn, caches.*[idx], arena);
             },
             .lrange => |v| {
                 const hash = hashKey(v.dll_name);
                 const idx = hash % caches.len;
-                print("\nCache{d}", .{idx});
                 try worker(cmd, conn, caches.*[idx], arena);
             },
         }

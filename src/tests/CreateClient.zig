@@ -24,8 +24,6 @@ const Conn = struct {
 
 const Self = @This();
 client_addr: std.net.Address,
-// const nw = try posix.write(client_fd, "*3\r\n$3\r\nSET\r\n$4\r\nname\r\n$3\r\nVic\r\n");
-
 pub fn createClient(port: u16) !Self {
     const client_addr = try std.net.Address.parseIp4("127.0.0.1", port);
     return Self{
@@ -118,12 +116,9 @@ pub fn set(self: Self, key: []const u8, value: []const u8) ![]const u8 {
         return ClientError.FailedToSet;
     }
 
-    std.debug.print("\nserver response: {s}", .{rbuf[0..nr]});
-
     const s = try std.heap.c_allocator.alloc(u8, nr);
     std.mem.copyForwards(u8, s, rbuf[0..nr]);
     return s;
-    // return ClientError.Success;
 }
 
 pub fn get(self: Self, key: []const u8) ![]const u8 {
@@ -151,11 +146,35 @@ pub fn get(self: Self, key: []const u8) ![]const u8 {
     return s;
 }
 
+pub fn del(self: Self, key: []const u8) ![]const u8 {
+    const client_fd = try self.createConn();
+    const response = try std.fmt.allocPrint(
+        std.heap.c_allocator,
+        "*2\r\n$3\r\nDEL\r\n${d}\r\n{s}\r\n",
+        .{ key.len, key },
+    );
+
+    const nw = try posix.write(client_fd, response);
+    if (nw < 0) {
+        return;
+    }
+    var rbuf: [1024]u8 = undefined;
+    const nr = try posix.read(client_fd, &rbuf);
+    const resp = rbuf[0..nr];
+
+    if (std.mem.eql(u8, resp, "-ERROR")) {
+        return ClientError.ValueNotFound;
+    }
+
+    const s = try std.heap.c_allocator.alloc(u8, nr);
+    std.mem.copyForwards(u8, s, rbuf[0..nr]);
+    return s;
+}
+
 // "*3\r\n$5\r\nLPUSH\r\n$6\r\nmylist\r\n$3\r\none\r\n";
 // *4\r\n$5\r\nLPUSH\r\n$6\r\nmylist\r\n$4\r\nfive\r\n$3\r\nsix\r\n
 pub fn lpush(self: Self, comptime num_items: usize, llname: []const u8, items: []const []const u8) ![]const u8 {
     const client_fd = try self.createConn();
-    // defer posix.close(client_fd);
     const precursor = try std.fmt.allocPrint(
         std.heap.c_allocator,
         "*{d}\r\n$5\r\nLPUSH\r\n${d}\r\n{s}\r\n",
@@ -202,7 +221,6 @@ pub fn lpush(self: Self, comptime num_items: usize, llname: []const u8, items: [
 // "*4\r\n$6\r\nLRANGE\r\n$6\r\nmylist\r\n$1\r\n0\r\n$2\r\n-1\r\n"
 pub fn lrange(self: Self, ll_name: []const u8, start: []const u8, end: []const u8) !void {
     const client_fd = try self.createConn();
-    // defer posix.close(client_fd);
     const req = try std.fmt.allocPrint(
         std.heap.c_allocator,
         "*4\r\n$6\r\nLRANGE\r\n${d}\r\n{s}\r\n+{d}\r\n{s}\r\n+{d}\r\n{s}\r\n",
@@ -225,13 +243,4 @@ pub fn lrange(self: Self, ll_name: []const u8, start: []const u8, end: []const u
     }
 
     std.debug.print("\nresponse: {s}", .{rbuf[0..nr]});
-}
-
-test "Test Cache and Snapshot" {
-    const cache = try Self.createClient(6379);
-    // var str_arr = [_][]const u8{ "one", "two", "three" };
-    // _ = try cache.lpush(3, "mylist", &str_arr);
-    _ = try cache.set("name", "Vic");
-    _ = try cache.lrange("mylist", "0", "-1");
-    // _ = try cache.get("name");
 }

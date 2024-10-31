@@ -195,22 +195,22 @@ pub fn loadCacheFromDisk(self: *Self, filename: []const u8, empty_cache: *Cache)
 }
 
 pub fn snapCaches(caches: *[]*Cache) !void {
-    var sleep: u64 = 1_000_000_000;
+    var sleep: u64 = 5_000_000_000;
     while (true) {
         for (caches.*, 0..) |cache, i| {
             if (cache.key_change_count >= 1000) {
-                sleep = 1_000_000_000;
+                sleep = 5_000_000_000;
                 var buf_size: [256]u8 = undefined;
-                const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_cache_{}.dat", .{i});
+                const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_caches/snapped_cache_{}.dat", .{i});
                 std.debug.print("\nSnapping the cache: {s}", .{cacheName});
                 saveToFile(cacheName, cache) catch {
                     return SnapShotError.FailedToSnapCache;
                 };
                 cache.key_change_count = 0;
             } else if (cache.key_change_count >= 1) {
-                sleep = 1_000_000_000;
+                sleep = 5_000_000_000;
                 var buf_size: [256]u8 = undefined;
-                const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_cache_{}.dat", .{i});
+                const cacheName = try std.fmt.bufPrint(&buf_size, "snapped_caches/snapped_cache_{}.dat", .{i});
                 std.debug.print("\nSnapping the cache: {s}", .{cacheName});
                 saveToFile(cacheName, cache) catch {
                     return SnapShotError.FailedToSnapCache;

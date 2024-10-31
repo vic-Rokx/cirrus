@@ -10,8 +10,9 @@ fn createNimbusCache(port: u16) !void {
     const config = Cirrus.Config{
         .addr = "127.0.0.1",
         .port = port,
-        .allocator = &allocator,
+        .arena = &allocator,
         .replicas = 2,
+        .enabled_multithread = false,
     };
 
     try nimbus.init(config);
@@ -20,8 +21,6 @@ fn createNimbusCache(port: u16) !void {
 
 fn createCluster() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // defer arena.deinit();
     defer if (gpa.deinit() != .ok) @panic("Memmory leak...");
     var allocator = gpa.allocator();
 
@@ -53,13 +52,12 @@ fn createCluster() !void {
     var cluster: Cluster = undefined;
     try cluster.init(config_cluster);
     try cluster.run();
-    try cluster.deinit();
 }
 
 pub fn main() !void {
     try createCluster();
     // var thread0 = try std.Thread.spawn(.{}, createCluster, .{});
-    // var thread1 = try std.Thread.spawn(.{}, createNimbusCache, .{6832});
+    // var thread1 = try std.Thread.spawn(.{}, createNimbusCache, .{6379});
     // var thread2 = try std.Thread.spawn(.{}, createNimbusCache, .{6383});
     // thread0.join();
     // thread1.join();

@@ -28,6 +28,11 @@ pub const RESP = union(enum) {
                         .key = v.values[1].string,
                     } };
                 }
+                if (std.ascii.eqlIgnoreCase(v.values[0].string, "DEL")) {
+                    return Command{ .del = .{
+                        .key = v.values[1].string,
+                    } };
+                }
                 if (std.ascii.eqlIgnoreCase(v.values[0].string, "LPUSH")) {
                     if (v.values.len > 3) {
                         const len = v.values.len;
@@ -79,6 +84,7 @@ pub const Command = union(enum) {
     ping: void,
     get: struct { key: []const u8 },
     set: struct { key: []const u8, value: RESP },
+    del: struct { key: []const u8 },
     lpush: struct {
         dll_name: []const u8,
         dll_new_value: []const u8,
