@@ -10,6 +10,9 @@ const State = @import("../cluster.zig").State;
 const DLL = @import("../storage/dll.zig").DLinkedList;
 const Types = @import("../types.zig");
 const Parser = @import("../parser.zig");
+const helpers = @import("../utils/helpers.zig");
+const handles = @import("command_handles.zig");
+const hashKey = helpers.hashKey;
 pub fn acceptNewConnection(
     fd_conns: *std.ArrayList(*Conn),
     socket_fd: posix.socket_t,
@@ -75,153 +78,129 @@ pub fn processConnection(conn: *Conn) void {
     }
 }
 
-pub fn parseCommand(conn: *Conn, arena: *std.mem.Allocator) !?Command {
-    print("\nParsing message: \n{s}", .{conn.rbuf[0..conn.rbuf_size]});
-    var msg = try Parser.parse(conn.*.rbuf[0..conn.rbuf_size], arena);
-    const command = try msg.toCommand();
-    return command;
-}
-
-pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocator) !void {
-    print("\nWorker parsing request... ", .{});
-    // var current_time = std.time.nanoTimestamp();
-
+fn callCommand(
+    cmd: Command,
+    pos_command: *u16,
+    conn: *Conn,
+    caches: *const []*Cache,
+    arena: *std.mem.Allocator,
+) !void {
     switch (cmd) {
         .ping => {
-            conn.buffer = "PONG";
+            try worker(cmd, conn, caches.*[0], arena);
+            try stateResp(conn);
+            pos_command.* += 1;
         },
         .echo => |v| {
-            const response = try std.fmt.allocPrint(arena.*, "${}\r\n{s}\r\n", .{ v.len, v });
-            conn.buffer = response;
+            const hash = hashKey(v);
+            const idx = hash % caches.len;
+            try worker(cmd, conn, caches.*[idx], arena);
+            try stateResp(conn);
+            pos_command.* += 2;
         },
         .set => |v| {
-            cache.*.set(v.key, v.value) catch {
-                conn.buffer = "-ERROR";
-                return;
-            };
-            conn.buffer = "+OK";
+            const hash = hashKey(v.key);
+            const idx = hash % caches.len;
+            try worker(cmd, conn, caches.*[idx], arena);
+            try stateResp(conn);
+            pos_command.* += 3;
         },
         .get => |v| {
-            const entry = cache.*.get(v.key);
-            if (entry != null) {
-                const response = try std.fmt.allocPrint(
-                    arena.*,
-                    "${}\r\n{s}\r\n",
-                    .{ entry.?.value.string.len, entry.?.value.string },
-                );
-                arena.free(v.key);
-                conn.buffer = response;
-            } else {
-                conn.buffer = "-ERROR";
-            }
+            const hash = hashKey(v.key);
+            const idx = hash % caches.len;
+            try worker(cmd, conn, caches.*[idx], arena);
+            try stateResp(conn);
+            pos_command.* += 2;
         },
         .del => |v| {
-            const entry_exists = cache.*.del(v.key);
-            if (!entry_exists) {
-                conn.buffer = "-NULL";
-                return;
-            }
-            conn.buffer = "+OK";
+            const hash = hashKey(v.key);
+            const idx = hash % caches.len;
+            try worker(cmd, conn, caches.*[idx], arena);
+            try stateResp(conn);
+            pos_command.* += 2;
         },
         .lpush => |v| {
-            const entry = cache.*.get(v.dll_name);
-            var response: []const u8 = ":1\r\n";
-            if (entry == null) {
-                const dll = try arena.create(DLL);
-                dll.* = DLL.init(arena.*);
-                try dll.*.addFront(v.dll_new_value);
-                const dll_resp = Types.RESP{ .dll = dll };
-                try cache.*.set(v.dll_name, dll_resp);
-            } else if (entry != null) {
-                const dll = entry.?.value.dll;
-                try dll.*.addFront(v.dll_new_value);
-
-                response = try std.fmt.allocPrint(
-                    arena.*,
-                    ":{}\r\n",
-                    .{dll.size},
-                );
-            }
-            conn.buffer = response;
+            const hash = hashKey(v.dll_name);
+            const idx = hash % caches.len;
+            try worker(cmd, conn, caches.*[idx], arena);
+            try stateResp(conn);
+            pos_command.* += 3;
         },
         .lpushmany => |v| {
-            const entry = cache.*.get(v.dll_name);
-            var response: []const u8 = ":1\r\n";
-            if (entry == null) {
-                const dll = try arena.create(DLL);
-                dll.* = DLL.init(arena.*);
-                for (v.dll_values) |value| {
-                    try dll.*.addBack(value);
-                }
-                const dll_resp = Types.RESP{ .dll = dll };
-                try cache.*.set(v.dll_name, dll_resp);
-            } else if (entry != null) {
-                const dll = entry.?.value.dll;
-                for (v.dll_values) |value| {
-                    try dll.*.addBack(value);
-                }
-
-                response = try std.fmt.allocPrint(
-                    arena.*,
-                    ":{}\r\n",
-                    .{dll.size},
-                );
-
-                const dll_resp = Types.RESP{ .dll = dll };
-                try cache.*.set(v.dll_name, dll_resp);
-            }
-            conn.buffer = response;
+            const hash = hashKey(v.dll_name);
+            const idx = hash % caches.len;
+            try worker(cmd, conn, caches.*[idx], arena);
+            try stateResp(conn);
+            const num_values: u16 = @intCast(v.dll_values.len);
+            pos_command.* += num_values + 2;
         },
         .lrange => |v| {
-            const entry = cache.*.get(v.dll_name);
-            if (entry != null) {
-                const dll = entry.?.value.dll;
-                var size: usize = dll.*.size;
-                const start: usize = @intCast(v.start_index);
-                const additional: usize = @intCast(@abs(v.end_range));
-                if (additional > size or start >= size) {
-                    conn.buffer = "-ERROR INDEX RANGE";
-                } else {
-                    if (v.end_range < -1) {
-                        size -= additional - 1;
-                    }
-                    // var builder: std.RingBuffer = try std.RingBuffer.init(arena.*, 1024);
-                    var builder = try std.RingBuffer.init(arena.*, 1024);
-                    const addition: []const u8 = try std.fmt.allocPrint(
-                        arena.*,
-                        "*{}\r\n",
-                        .{size},
-                    );
-                    try builder.writeSlice(addition);
-                    var node = dll.*.head.?;
-                    for (0..size) |i| {
-                        if (i >= start) {
-                            const value: []const u8 = try std.fmt.allocPrint(
-                                arena.*,
-                                "${}\r\n{s}\r\n",
-                                .{ size, node.*.value },
-                            );
-                            try builder.writeSlice(value);
-                        }
-                        if (node.*.next != null) {
-                            node = node.*.next.?;
-                        }
-                    }
-                    const len = builder.len();
-                    conn.builder = &builder;
-                    // print("\nBuilder address:{s}", .{conn.builder.?.data[0..len]});
-                    print("\nBuilder address:{d}", .{conn.builder.len()});
-                    // conn.builder.?.deinit(arena.*);
-                    conn.buffer = builder.data[0..len];
+            const hash = hashKey(v.dll_name);
+            const idx = hash % caches.len;
+            try worker(cmd, conn, caches.*[idx], arena);
+            try stateResp(conn);
+            pos_command.* += 4;
+        },
+    }
+}
+
+pub fn parseMsg(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
+    const msg = try Parser.parse(conn.*.rbuf[0..conn.rbuf_size], arena);
+
+    var pos_command: u16 = 0;
+    switch (msg) {
+        .array => {
+            var msg_copy = msg;
+            const len = msg.array.values.len;
+            while (pos_command < len) {
+                msg_copy.array.values = msg.array.values[pos_command..];
+                const cmd = try msg_copy.toCommand();
+                if (cmd != null) {
+                    print("Calling worker", .{});
+                    try callCommand(cmd.?, &pos_command, conn, caches, arena);
                 }
-            } else {
-                conn.buffer = "-ERROR";
+            }
+        },
+        else => {
+            const cmd = try msg.toCommand();
+            if (cmd != null) {
+                try callCommand(cmd.?, &pos_command, conn, caches, arena);
             }
         },
     }
 }
 
+pub fn worker(cmd: Command, conn: *Conn, cache: *Cache, arena: *std.mem.Allocator) !void {
+    switch (cmd) {
+        .ping => {
+            handles.handlePing(conn);
+        },
+        .echo => |v| {
+            try handles.handleEcho(conn, arena, v);
+        },
+        .set => |v| {
+            handles.handleSet(conn, cache, v.key, v.value);
+        },
+        .get => |v| {
+            try handles.handleGet(conn, cache, arena, v.key);
+        },
+        .del => |v| {
+            handles.handleDel(conn, cache, v.key);
+        },
+        .lpush => |v| {
+            try handles.handleLpush(conn, cache, arena, v.dll_name, v.dll_new_value);
+        },
+        .lpushmany => |v| {
+            try handles.handleLpushMany(conn, cache, arena, v.dll_name, v.dll_values);
+        },
+        .lrange => |v| {
+            try handles.handleLrange(conn, cache, arena, v.dll_name, v.start_index, v.end_range);
+        },
+    }
+}
+
 pub fn dispatch(conn: *Conn) !void {
+    print("\nDispatching request{s}", .{conn.buffer[0..]});
     const wv = posix.write(conn.fd, conn.buffer) catch |err| {
         print("\n Write Error: {any}", .{err});
         if (error.EINTR == err) {}

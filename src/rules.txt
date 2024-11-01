@@ -1,0 +1,14 @@
+you cannot init a map or any variable within a scope and expext that ref to live
+fn createMap() {
+  var map = std.StringHashMap(RESP).init(arena);
+  return &map;
+}
+
+while the map itself will exist the map var ptr will not since it is out of scope when the function ends
+instead 
+
+fn createMap() {
+  const map_ptr = arena.create(std.StringHashMap(RESP));
+  map__ptr.* = std.StringHashMap(RESP).init(arena);
+  return map_ptr;
+}

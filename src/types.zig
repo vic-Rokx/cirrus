@@ -7,6 +7,9 @@ pub const RESP = union(enum) {
     string: []const u8,
     int: i32,
     dll: *DLinkedList,
+    float: f32,
+    boolean: bool,
+    map: *std.StringHashMap(RESP),
 
     pub fn toCommand(self: Self) !?Command {
         return switch (self) {
@@ -34,25 +37,24 @@ pub const RESP = union(enum) {
                     } };
                 }
                 if (std.ascii.eqlIgnoreCase(v.values[0].string, "LPUSH")) {
-                    if (v.values.len > 3) {
-                        const len = v.values.len;
-                        const adj_len = v.values.len - 2;
-                        const arr_str = try self.array.arena.*.alloc([]const u8, adj_len);
+                    return Command{ .lpush = .{
+                        .dll_name = v.values[1].string,
+                        .dll_new_value = v.values[2].string,
+                    } };
+                }
+                if (std.ascii.eqlIgnoreCase(v.values[0].string, "LPUSHMANY")) {
+                    const len = v.values.len;
+                    const adj_len = v.values.len - 2;
+                    const arr_str = try self.array.arena.*.alloc([]const u8, adj_len);
 
-                        for (2..len) |i| {
-                            arr_str[i - 2] = v.values[i].string;
-                        }
-
-                        return Command{ .lpushmany = .{
-                            .dll_name = v.values[1].string,
-                            .dll_values = arr_str,
-                        } };
-                    } else {
-                        return Command{ .lpush = .{
-                            .dll_name = v.values[1].string,
-                            .dll_new_value = v.values[2].string,
-                        } };
+                    for (2..len) |i| {
+                        arr_str[i - 2] = v.values[i].string;
                     }
+
+                    return Command{ .lpushmany = .{
+                        .dll_name = v.values[1].string,
+                        .dll_values = arr_str,
+                    } };
                 }
                 if (std.ascii.eqlIgnoreCase(v.values[0].string, "LRANGE")) {
                     return Command{ .lrange = .{
@@ -73,6 +75,15 @@ pub const RESP = union(enum) {
                 return null;
             },
             .int => |_| {
+                return null;
+            },
+            .float => |_| {
+                return null;
+            },
+            .boolean => |_| {
+                return null;
+            },
+            .map => |_| {
                 return null;
             },
         };
@@ -99,6 +110,81 @@ pub const Command = union(enum) {
         end_range: i32,
     },
 };
+
+test "multi command" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = gpa.allocator();
+    var arr_set = [_]RESP{
+        RESP{ .string = "SET" },
+        RESP{ .string = "age" },
+        RESP{ .int = 12 },
+        RESP{ .string = "SET" },
+        RESP{ .string = "name" },
+        RESP{ .string = "Vic" },
+        RESP{ .string = "SET" },
+        RESP{ .string = "height" },
+        RESP{ .int = 175 },
+        RESP{ .string = "LPUSH" },
+        RESP{ .string = "DLLNAME" },
+        RESP{ .string = "DLLVALUE" },
+        RESP{ .string = "GET" },
+        RESP{ .string = "name" },
+        RESP{ .string = "LRANGE" },
+        RESP{ .string = "DLLNAME" },
+        RESP{ .int = 0 },
+        RESP{ .int = 1 },
+        RESP{ .string = "LPUSHMANY" },
+        RESP{ .string = "DLLNAME" },
+        RESP{ .string = "one" },
+        RESP{ .string = "two" },
+        RESP{ .string = "three" },
+        RESP{ .string = "four" },
+    };
+    const resp = RESP{ .array = .{ .values = &arr_set, .arena = &arena } };
+    var cmd_values = resp;
+    const len = resp.array.values.len;
+    var pos_command: u16 = 0;
+    switch (resp) {
+        .array => {
+            while (pos_command < len) {
+                cmd_values.array.values = resp.array.values[pos_command..];
+                const cmd = try cmd_values.toCommand();
+                // std.debug.print("\narray: {any}\n", .{cmd_values});
+                std.debug.print("\nCommand: {any}\n", .{cmd.?});
+                std.debug.print("\npos: {d}\n", .{pos_command});
+                switch (cmd.?) {
+                    .ping => {
+                        pos_command += 1;
+                    },
+                    .echo => {
+                        pos_command += 2;
+                    },
+                    .set => {
+                        pos_command += 3;
+                    },
+                    .get => {
+                        pos_command += 2;
+                    },
+                    .del => {
+                        pos_command += 2;
+                    },
+                    .lpush => {
+                        pos_command += 3;
+                    },
+                    .lpushmany => |v| {
+                        pos_command += 2;
+                        const len_v: u16 = @intCast(v.dll_values.len);
+                        pos_command += len_v;
+                    },
+                    .lrange => {
+                        pos_command += 4;
+                    },
+                }
+            }
+        },
+        else => {},
+    }
+}
 
 test "test to Command" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
