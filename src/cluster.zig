@@ -276,9 +276,6 @@ pub fn run(self: *Self) !void {
 test "test memory leaks cluster init" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer if (gpa.deinit() != .ok) @panic("Memmory leak...");
-
-    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    // defer arena.deinit();
     var arena = gpa.allocator();
 
     const cache_configs = [_]CacheConfig{
@@ -332,7 +329,6 @@ test "test memory leaks cluster init" {
     defer (cluster.deinitCacheArray()) catch @panic("Could not deinit Cache array");
 
     for (cluster.caches_inst.?, 0..) |cache, i| {
-        // _ = try std.Thread.spawn(.{}, runCache, .{self.caches_inst.?[0]});
         var cache_thread = try std.Thread.spawn(.{}, runCache, .{cache});
         threads[i] = &cache_thread;
         defer cache_thread.join();

@@ -99,3 +99,35 @@ pub const Command = union(enum) {
         end_range: i32,
     },
 };
+
+test "test to Command" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var arena = gpa.allocator();
+
+    var arr_set = [_]RESP{
+        RESP{ .string = "SET" },
+        RESP{ .string = "name" },
+        RESP{ .string = "Vic" },
+    };
+    var resp = RESP{ .array = .{ .values = &arr_set, .arena = &arena } };
+
+    var cmd = resp.toCommand();
+    var command = Command{ .set = .{
+        .key = "name",
+        .value = RESP{ .string = "Vic" },
+    } };
+    try std.testing.expectEqualDeep(command, cmd);
+
+    var arr_get = [_]RESP{
+        RESP{ .string = "GET" },
+        RESP{ .string = "name" },
+    };
+
+    resp = RESP{ .array = .{ .values = &arr_get, .arena = &arena } };
+
+    cmd = resp.toCommand();
+    command = Command{ .get = .{
+        .key = "name",
+    } };
+    try std.testing.expectEqualDeep(command, cmd);
+}
