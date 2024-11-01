@@ -9,7 +9,7 @@ const hashKey = helpers.hashKey;
 const assert = error_fns.assert_cm;
 const Cache = @import("cache.zig");
 const connections = @import("cache_runtime/connections.zig");
-const parseCommand = connections.parseCommand;
+const parseMsg = connections.parseMsg;
 const worker = connections.worker;
 
 const Self = @This();
@@ -120,29 +120,25 @@ pub fn pollConnections(
 
 fn connectionIo(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
     if (caches.*.len > 1) {
-        try connectionIoSingleInst(conn, caches.*[0], arena);
+        try connectionIoSingleInst(conn, caches, arena);
     } else {
         try connectionIoClusterInst(conn, caches, arena);
     }
 }
 
-fn connectionIoSingleInst(conn: *Conn, cache: *Cache, arena: *std.mem.Allocator) !void {
+fn connectionIoSingleInst(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
     switch (conn.state) {
         State.REQ => {
             print("\nreq state\n", .{});
             try connections.stateReq(conn);
         },
         State.Processing => {
-            const command = parseCommand(conn, arena) catch {
+            parseMsg(conn, caches, arena) catch |err| {
+                print("\nWorker event error: {any}", .{err});
                 return error.ReadFailed;
             };
-            if (command) |cmd| {
-                worker(cmd, conn, cache, arena) catch |err| {
-                    print("\nWorker event error: {any}", .{err});
-                    return error.ReadFailed;
-                };
-            }
-            conn.state = State.RESP;
+            // conn.state = State.RESP;
+            conn.state = State.End;
             return;
         },
         State.RESP => {
@@ -159,10 +155,12 @@ fn connectionIoClusterInst(conn: *Conn, caches: *const []*Cache, arena: *std.mem
             try connections.stateReq(conn);
         },
         State.Processing => {
-            parseCaches(conn, caches, arena) catch |err| {
+            parseMsg(conn, caches, arena) catch |err| {
                 print("\nWorker event error: {any}", .{err});
                 return error.ReadFailed;
             };
+            conn.state = State.End;
+            return;
         },
         State.RESP => {
             try connections.stateResp(conn);
@@ -172,52 +170,7 @@ fn connectionIoClusterInst(conn: *Conn, caches: *const []*Cache, arena: *std.mem
 }
 
 fn parseCaches(conn: *Conn, caches: *const []*Cache, arena: *std.mem.Allocator) !void {
-    const command = try parseCommand(conn, arena);
-    if (command) |cmd| {
-        switch (cmd) {
-            .ping => {
-                try worker(cmd, conn, caches.*[0], arena);
-            },
-            .echo => |v| {
-                const hash = hashKey(v);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .set => |v| {
-                const hash = hashKey(v.key);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .get => |v| {
-                const hash = hashKey(v.key);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .del => |v| {
-                const hash = hashKey(v.key);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .lpush => |v| {
-                const hash = hashKey(v.dll_name);
-                const idx = hash % caches.len;
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .lpushmany => |v| {
-                const hash = hashKey(v.dll_name);
-                const idx = hash % caches.len;
-                print("\nCache{d}", .{idx});
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-            .lrange => |v| {
-                const hash = hashKey(v.dll_name);
-                const idx = hash % caches.len;
-                print("\nCache{d}", .{idx});
-                try worker(cmd, conn, caches.*[idx], arena);
-            },
-        }
-    }
-
+    try parseMsg(conn, caches, arena);
     conn.state = State.RESP;
     return;
 }

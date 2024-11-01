@@ -12,7 +12,6 @@ const connections = @import("cache_runtime/connections.zig");
 const Conn = @import("cluster.zig").Conn;
 const State = @import("cluster.zig").State;
 const worker = connections.worker;
-const parseCommand = connections.parseCommand;
 const poller = @import("poller.zig").pollConnections;
 
 const DEFAULT_PORT: usize = 6379;

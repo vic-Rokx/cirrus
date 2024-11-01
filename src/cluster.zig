@@ -13,7 +13,6 @@ const DLL = @import("storage/dll.zig").DLinkedList;
 const Types = @import("types.zig");
 const connections = @import("cache_runtime/connections.zig");
 const worker = connections.worker;
-const parseCommand = connections.parseCommand;
 const snapCaches = @import("snapshot.zig").snapCaches;
 const loadCacheFromDisk = @import("snapshot.zig").loadCacheFromDisk;
 const SnapShotError = @import("snapshot.zig").SnapShotError;
@@ -255,17 +254,17 @@ pub fn run(self: *Self) !void {
         // _ = try std.Thread.spawn(.{}, runCache, .{self.caches_inst.?[0]});
         var cache_thread = try std.Thread.spawn(.{}, runCache, .{cache});
         threads[i] = &cache_thread;
-        defer cache_thread.join();
+        // defer cache_thread.join();
     }
 
     // Initialize SnapShot
-    if (self.enable_snapshot) {
-        var snapshot: SnapShot = undefined;
-        snapshot.init(self.arena);
-        try self.populateCacheData(&snapshot);
-        _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
-        // defer snap_thread.join();
-    }
+    // if (self.enable_snapshot) {
+    //     var snapshot: SnapShot = undefined;
+    //     snapshot.init(self.arena);
+    //     try self.populateCacheData(&snapshot);
+    //     _ = try std.Thread.spawn(.{}, snapCaches, .{&self.caches.?});
+    //     // defer snap_thread.join();
+    // }
 
     try posix.listen(socket_fd, 128);
     std.debug.print("Cirrus Cluster listening on {}\n", .{ip_addr});
